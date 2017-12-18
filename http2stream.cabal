@@ -3,7 +3,7 @@ version:             0.1.0
 -- synopsis:
 -- description:
 homepage:            https://github.com/plintx/http2stream#readme
-license:             MIT
+license:             BSD3
 license-file:        LICENSE
 author:              Quoc-An Ho
 maintainer:          quoc.ho@matrix.ai
@@ -14,11 +14,14 @@ cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src
-  exposed-modules:     Network.HTTP2
+  exposed-modules:     Network.Stream.HTTP2
   build-depends:       base >= 4.7 && < 5
                      , bytestring
                      , http2
                      , stm
+                     , io-streams
+                     , containers
+                     , extra
   default-language:    Haskell2010
 
 test-suite http2stream-test
@@ -27,6 +30,10 @@ test-suite http2stream-test
   main-is:             Spec.hs
   build-depends:       base
                      , http2stream
+                     , http2
+                     , bytestring
+                     , io-streams
+                     , network
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N
   default-language:    Haskell2010
 

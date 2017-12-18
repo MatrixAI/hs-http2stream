@@ -1,10 +1,21 @@
-module Network.Stream.HTTP2.Types
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE RecordWildCards #-}
+
+module Network.Stream.HTTP2.Types where
 
 import Data.ByteString (ByteString)
 import Network.HTTP2
+import Network.HTTP2.Priority
 import Network.HPACK
 import Data.IORef
+import Control.Concurrent.STM
+import Control.Exception (SomeException)
+import Control.Monad
+import System.IO.Streams
 
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntMap.Strict as M
 ----------------------------------------------------------------
 
 data Context = Context {
@@ -41,13 +52,9 @@ data Input = IControl !Control
            | IData !StreamId !ByteString 
            | IHeaders !StreamId !HeaderBlockFragment
            
-data Output = OHeaders !StreamId !FrameFlags !HeadersFrame
-            | OData    !StreamId !FrameFlags !DataFrame
+data Output = OHeaders !StreamId !FrameFlags !FramePayload
+            | OData    !StreamId !FrameFlags !FramePayload
 
-makeOutput :: Context -> ByteString -> IO Output
-makeOutput Context{http2settings} bs = do
-    Settings{maxFrameSize} <- readIORef http2settings
-    
 newContext :: IO Context
 newContext = Context <$> newIORef defaultSettings
                      <*> newIORef False
@@ -57,6 +64,7 @@ newContext = Context <$> newIORef defaultSettings
                      <*> newIORef Nothing
                      <*> newIORef 0
                      <*> newIORef 0
+                     <*> newTQueueIO
                      <*> newTQueueIO
                      <*> newPriorityTree
                      <*> newTQueueIO
@@ -183,28 +191,27 @@ updateAllStreamWindow adst (StreamTable ref) = do
     strms <- M.elems <$> readIORef ref
     forM_ strms $ \strm -> atomically $ modifyTVar (streamWindow strm) adst
 
-{-# INLINE forkAndEnqueueWhenReady #-}
-forkAndEnqueueWhenReady :: IO () -> PriorityTree Output -> Output -> Manager -> IO ()
-forkAndEnqueueWhenReady wait outQ out mgr = bracket setup teardown $ \_ ->
-    void . forkIO $ do
-        wait
-        enqueueOutput outQ out
-  where
-    setup = addMyId mgr
-    teardown _ = deleteMyId mgr
+-- {-# INLINE forkAndEnqueueWhenReady #-}
+-- forkAndEnqueueWhenReady :: IO () -> PriorityTree Output -> Output -> Manager -> IO ()
+-- forkAndEnqueueWhenReady wait outQ out mgr = bracket setup teardown $ \_ ->
+--     void . forkIO $ do
+--         wait
+--         enqueueOutput outQ out
+--   where
+--     setup = addMyId mgr
+--     teardown _ = deleteMyId mgr
 
-{-# INLINE enqueueOutput #-}
-enqueueOutput :: PriorityTree Output -> Output -> IO ()
-enqueueOutput outQ out = do
-    let Stream{..} = outputStream out
-    pre <- readIORef streamPrecedence
-    enqueue outQ streamNumber pre out
+-- {-# INLINE enqueueOutput #-}
+-- enqueueOutput :: PriorityTree Output -> Output -> IO ()
+-- enqueueOutput outQ out = do
+--     let Stream{..} = outputStream out
+--     pre <- readIORef streamPrecedence
+--     enqueue outQ streamNumber pre out
 
-{-# INLINE enqueueControl #-}
-enqueueControl :: TQueue Control -> Control -> IO ()
-enqueueControl ctlQ ctl = atomically $ writeTQueue ctlQ ctl
+-- {-# INLINE enqueueControl #-}
+-- enqueueControl :: TQueue Control -> Control -> IO ()
+-- enqueueControl ctlQ ctl = atomically $ writeTQueue ctlQ ctl
 
 ----------------------------------------------------------------
 
 type StreamPair = (InputStream ByteString, OutputStream ByteString)
-
