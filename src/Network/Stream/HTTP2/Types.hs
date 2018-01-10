@@ -32,8 +32,8 @@ data Context = Context {
   , continued          :: !(IORef (Maybe StreamId))
   , clientStreamId     :: !(IORef StreamId)
   , serverStreamId     :: !(IORef StreamId)
-  , inputQ             :: !(TQueue Input)
-  , acceptQ            :: !(TQueue Stream)
+  , inputQ             :: !(TQueue Frame)
+  , acceptQ            :: !(TQueue StreamPair)
   , outputQ            :: !(PriorityTree Output)
   , controlQ           :: !(TQueue Control)
   , encodeDynamicTable :: !DynamicTable
@@ -47,13 +47,11 @@ data Control = CFinish
              | CFrame     !ByteString
              | CSettings  !ByteString !SettingsList
              | CSettings0 !ByteString !ByteString !SettingsList
+             deriving Show
 
-data Input = IControl !Control 
-           | IData !StreamId !ByteString 
-           | IHeaders !StreamId !HeaderBlockFragment
-           
-data Output = OHeaders !StreamId !FrameFlags !FramePayload
-            | OData    !StreamId !FrameFlags !FramePayload
+data Output = OStream !StreamId !(TQueue (Maybe ByteString))
+instance Show (Output) where
+  show (OStream sid _) = "OStream " ++ show sid
 
 newContext :: IO Context
 newContext = Context <$> newIORef defaultSettings
@@ -62,8 +60,8 @@ newContext = Context <$> newIORef defaultSettings
                      <*> newIORef 0
                      <*> newIORef 0
                      <*> newIORef Nothing
-                     <*> newIORef 0
-                     <*> newIORef 0
+                     <*> newIORef 1
+                     <*> newIORef 2
                      <*> newTQueueIO
                      <*> newTQueueIO
                      <*> newPriorityTree
@@ -143,6 +141,7 @@ newStream :: StreamId -> WindowSize -> IO Stream
 newStream sid win = Stream sid <$> newIORef Idle
                                <*> newTVarIO win
                                <*> newIORef defaultPrecedence
+                               <*> newTQueueIO
 
 newPushStream :: Context -> WindowSize -> Precedence -> IO Stream
 newPushStream Context{serverStreamId} win pre = do
@@ -150,6 +149,7 @@ newPushStream Context{serverStreamId} win pre = do
     Stream sid <$> newIORef Reserved
                <*> newTVarIO win
                <*> newIORef pre
+               <*> newTQueueIO
   where
     inc2 x = let !x' = x + 2 in (x', x')
 
@@ -214,4 +214,5 @@ updateAllStreamWindow adst (StreamTable ref) = do
 
 ----------------------------------------------------------------
 
-type StreamPair = (InputStream ByteString, OutputStream ByteString)
+-- functions to read and write from the stream in the IO monad
+type StreamPair = (IO ByteString, Maybe ByteString -> IO ())
