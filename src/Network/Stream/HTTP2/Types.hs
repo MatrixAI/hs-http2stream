@@ -16,6 +16,7 @@ import System.IO.Streams
 
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as M
+import qualified Control.Exception as E
 ----------------------------------------------------------------
 
 data Context = Context {
@@ -33,7 +34,7 @@ data Context = Context {
   , clientStreamId     :: !(IORef StreamId)
   , serverStreamId     :: !(IORef StreamId)
   , inputQ             :: !(TQueue Frame)
-  , acceptQ            :: !(TQueue StreamPair)
+  , acceptQ            :: !(TQueue StreamReaderWriter)
   , outputQ            :: !(PriorityTree Output)
   , controlQ           :: !(TQueue Control)
   , encodeDynamicTable :: !DynamicTable
@@ -49,9 +50,10 @@ data Control = CFinish
              | CSettings0 !ByteString !ByteString !SettingsList
              deriving Show
 
-data Output = OStream !StreamId !(TQueue (Maybe ByteString))
+data Output = OStream !StreamId !(TQueue ByteString)
+
 instance Show (Output) where
-  show (OStream sid _) = "OStream " ++ show sid
+  show (OStream sid _) = "OStream StreamId " ++ show sid
 
 newContext :: IO Context
 newContext = Context <$> newIORef defaultSettings
@@ -75,19 +77,19 @@ clearContext _ctx = return ()
 
 ----------------------------------------------------------------
 
-data OpenState =
-    JustOpened
-  | Continued [HeaderBlockFragment]
-              !Int  -- Total size
-              !Int  -- The number of continuation frames
-              !Bool -- End of stream
-              !Priority
-  | NoBody (TokenHeaderList,ValueTable) !Priority
-  | HasBody (TokenHeaderList,ValueTable) !Priority
-  | Body !(TQueue ByteString)
-         !(Maybe Int) -- received Content-Length
-                      -- compared the body length for error checking
-         !(IORef Int) -- actual body length
+-- data OpenState =
+  -- JustOpened
+  -- | Continued [HeaderBlockFragment]
+  --             !Int  -- Total size
+  --             !Int  -- The number of continuation frames
+  --             !Bool -- End of stream
+  --             !Priority
+  -- | NoBody (TokenHeaderList,ValueTable) !Priority
+  -- | HasBody (TokenHeaderList,ValueTable) !Priority
+  -- Body !(TQueue ByteString)
+         -- !(Maybe Int) -- received Content-Length
+         --              -- compared the body length for error checking
+         -- !(IORef Int) -- actual body length
 
 data ClosedCode = Finished
                 | Killed
@@ -97,8 +99,9 @@ data ClosedCode = Finished
 
 data StreamState =
     Idle
-  | Open !OpenState
-  | HalfClosed
+  | Open !(TQueue ByteString) !(TQueue (Maybe ByteString)) -- incoming and outgoing
+  | LocalClosed !(TQueue ByteString)                       -- incoming only 
+  | RemoteClosed !(TQueue (Maybe ByteString))              -- outgoing only
   | Closed !ClosedCode
   | Reserved
 
@@ -110,20 +113,25 @@ isOpen :: StreamState -> Bool
 isOpen Open{} = True
 isOpen _      = False
 
-isHalfClosed :: StreamState -> Bool
-isHalfClosed HalfClosed = True
-isHalfClosed _          = False
+isLocalClosed :: StreamState -> Bool
+isLocalClosed LocalClosed{} = True
+isLocalClosed _             = False
+
+isRemoteClosed :: StreamState -> Bool
+isRemoteClosed RemoteClosed{} = True
+isRemoteClosed _              = False
 
 isClosed :: StreamState -> Bool
 isClosed Closed{} = True
 isClosed _        = False
 
 instance Show StreamState where
-    show Idle        = "Idle"
-    show Open{}      = "Open"
-    show HalfClosed  = "HalfClosed"
-    show (Closed e)  = "Closed: " ++ show e
-    show Reserved    = "Reserved"
+    show Idle           = "Idle"
+    show Open{}         = "Open"
+    show LocalClosed{}  = "LocalClosed"
+    show RemoteClosed{} = "RemoteClosed"
+    show (Closed e)     = "Closed: " ++ show e
+    show Reserved       = "Reserved"
 
 ----------------------------------------------------------------
 
@@ -141,7 +149,6 @@ newStream :: StreamId -> WindowSize -> IO Stream
 newStream sid win = Stream sid <$> newIORef Idle
                                <*> newTVarIO win
                                <*> newIORef defaultPrecedence
-                               <*> newTQueueIO
 
 newPushStream :: Context -> WindowSize -> Precedence -> IO Stream
 newPushStream Context{serverStreamId} win pre = do
@@ -149,16 +156,36 @@ newPushStream Context{serverStreamId} win pre = do
     Stream sid <$> newIORef Reserved
                <*> newTVarIO win
                <*> newIORef pre
-               <*> newTQueueIO
   where
     inc2 x = let !x' = x + 2 in (x', x')
+
+readStream :: Stream -> IO ByteString
+readStream Stream{streamNumber, streamState} = do
+    ss <- readIORef streamState
+    bs <- case ss of
+            Open ins _ -> atomically $ readTQueue ins
+            LocalClosed ins -> atomically $ readTQueue ins
+            -- This shouldn't happen
+            otherwise -> E.throwIO $ StreamError InternalError streamNumber
+    return bs
+
+writeStream :: Stream -> (Maybe ByteString) -> IO ()
+writeStream Stream{streamNumber, streamState} bs = do
+    ss <- readIORef streamState
+    case ss of
+        Open _ outs -> atomically $ writeTQueue outs bs
+        RemoteClosed outs -> atomically $ writeTQueue outs bs
+        -- This shouldn't happen
+        otherwise -> E.throwIO $ StreamError InternalError streamNumber
 
 ----------------------------------------------------------------
 
 opened :: Context -> Stream -> IO ()
 opened Context{concurrency} Stream{streamState} = do
     atomicModifyIORef' concurrency (\x -> (x+1,()))
-    writeIORef streamState (Open JustOpened)
+    ins <- newTQueueIO
+    outs <- newTQueueIO
+    writeIORef streamState (Open ins outs)
 
 closed :: Context -> Stream -> ClosedCode -> IO ()
 closed Context{concurrency,streamTable} Stream{streamState,streamNumber} cc = do
@@ -215,4 +242,4 @@ updateAllStreamWindow adst (StreamTable ref) = do
 ----------------------------------------------------------------
 
 -- functions to read and write from the stream in the IO monad
-type StreamPair = (IO ByteString, Maybe ByteString -> IO ())
+type StreamReaderWriter = (IO ByteString, Maybe ByteString -> IO ())

@@ -23,6 +23,8 @@ import Control.Monad
 -- | For a given connection and connection context, receive and process an 
 -- incoming frame. Only 1 of these should be run per connection, as some of
 -- the stored data in the context (IORef stuff) is not thread safe. 
+-- TODO: if the flow control window is exhausted, enqueue a WINDOW_UPDATE
+-- frame to renew the window
 frameReceiver :: Context -> (Int -> IO BS.ByteString) -> IO ()
 frameReceiver ctx@Context{..} connReceive = forever $ do
     -- Receive and decode the frame header and payload
@@ -48,18 +50,15 @@ frameReceiver ctx@Context{..} connReceive = forever $ do
         -- Receiving a data frame
         -- Pass it to the correct stream
         DataFrame pl -> do
-            mstrm <- search streamTable streamId
-            case mstrm of
-                Nothing -> do
-                    -- The stream is not open/half-closed, so fail
-                    E.throwIO $ StreamError StreamClosed streamId
-                Just strm@(Stream{..}) -> do
-                    atomically $ modifyTVar' streamWindow (recvLen-)
-                    state <- readIORef streamState
-                    case state of
-                        Open (Body q clen blen) -> atomically $ writeTQueue q pl
-                        -- First frame of the stream after stream headers
-                        Open JustOpened -> undefined
+            -- The stream should have been in the streamTable by this point
+            -- TODO: How can we make this total?
+            Just strm@(Stream{..}) <- search streamTable streamId
+            atomically $ modifyTVar' streamWindow (recvLen-)
+            state <- readIORef streamState
+            case state of
+                Open ins _ -> atomically $ writeTQueue ins pl
+                LocalClosed ins -> atomically $ writeTQueue ins pl
+                otherwise -> sendReset StreamClosed streamId
 
         HeadersFrame mpri hdrblk -> do
             -- Need to read the stream headers and make a new stream
@@ -68,15 +67,11 @@ frameReceiver ctx@Context{..} connReceive = forever $ do
                 E.throwIO $ ConnectionError ProtocolError
                           $ "New client stream identifier must not decrease"
             Settings{initialWindowSize} <- readIORef http2settings 
-            strm@Stream{streamBody, streamPrecedence} <- newStream streamId initialWindowSize
+            strm@Stream{streamState, streamPrecedence} <- newStream streamId initialWindowSize
             prec <- readIORef streamPrecedence
             insert streamTable streamId strm
             opened ctx strm
-            
-            let is = atomically $ readTQueue streamBody
-            sendQ <- atomically $ newTQueue
-            let os = atomically . writeTQueue sendQ
-            atomically $ writeTQueue acceptQ (is, os) 
+            atomically $ writeTQueue acceptQ (readStream strm, writeStream strm) 
      
         PriorityFrame pri -> undefined
         RSTStreamFrame eid -> undefined
@@ -116,6 +111,7 @@ frameReceiver ctx@Context{..} connReceive = forever $ do
 -- | Evaluate the next stream to send frames for, and then send a data frame
 -- until either the stream flow-control window is exhausted or there is no more
 -- to send on the stream
+-- TODO: Support flow control
 frameSender :: Context -> (BS.ByteString -> IO ()) -> IO ()
 frameSender ctx@Context{controlQ, outputQ, streamTable} connSender = forever $ do
     --cframe <- atomically $ tryReadTQueue controlQ
@@ -126,26 +122,33 @@ frameSender ctx@Context{controlQ, outputQ, streamTable} connSender = forever $ d
         --     putStrLn $ show tid ++ " frameSender: settings" ++ show cframe
         --     connSender bs
         otherwise -> do 
-            (sid, pre, out) <- dequeue outputQ
-            frameSender' sid pre out >>= connSender
+            (sid, pre, ostrm) <- dequeue outputQ
+            frameSender' sid pre ostrm >>= connSender
   where
-    frameSender' sid pre out = case out of
-        OStream sid sendQ -> do
+    frameSender' sid pre ostrm = case ostrm of
+        OStream sid outs -> do
             -- Expect the stream to already be inserted or this is an error
             Just strm@Stream{streamState} <- search streamTable sid 
             ss <- readIORef streamState
-            enqueue outputQ sid pre out
-            if isOpen ss 
-              then do
-                  (atomically $ readTQueue sendQ) >>= \x -> case x of
-                      Nothing -> return $ encodeFrame (encodeInfo setEndStream sid) (DataFrame "")
-                      Just x -> do 
-                          putStrLn $ "Data " ++ show x
-                          return $ encodeFrame (encodeInfo id sid) (DataFrame x)
-              else do
-                  opened ctx strm
-                  putStrLn $ "Headers " ++ show sid
-                  -- TODO: Header List packing needs to occur here, may need to
-                  -- change types
-                  return $ encodeFrame (encodeInfo id sid) (HeadersFrame Nothing "")
+            -- re enqueue the output
+            enqueue outputQ sid pre ostrm
+            case ss of
+                Idle -> sendHeaders sid strm
+                Open _ outs -> send sid outs
+                RemoteClosed outs -> send sid outs
+                otherwise -> undefined -- TODO: need to make this a 
+                                       -- compile error so that this can't
+                                       -- happen
+    send sid outs = do
+        (atomically $ readTQueue outs) >>= \out -> 
+            let (out', flags) = case out of
+                    Nothing -> ("", setEndStream)
+                    Just bs -> (bs, id)
+            in return $ encodeFrame (encodeInfo flags sid) (DataFrame out')
+
+    sendHeaders sid strm = do
+        -- TODO: Header List packing needs to occur here, may need to
+        -- change types
+        opened ctx strm
+        return $ encodeFrame (encodeInfo id sid) (HeadersFrame Nothing "")
 

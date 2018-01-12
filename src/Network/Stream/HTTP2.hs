@@ -21,13 +21,13 @@ import Control.Concurrent.STM
 import Control.Monad
 
 
-acceptStream :: Context -> IO StreamPair
+acceptStream :: Context -> IO StreamReaderWriter
 acceptStream ctx@Context{acceptQ} = do
     sp <- atomically $ readTQueue acceptQ
     return sp
 
 
-dialStream :: HTTP2HostType -> Context -> IO StreamPair
+dialStream :: HTTP2HostType -> Context -> IO StreamReaderWriter
 dialStream hostType ctx@Context{outputQ, http2settings, streamTable, clientStreamId, serverStreamId} = do
     sid <- case hostType of
         HServer -> atomicModifyIORef' serverStreamId (\x -> (x+2, x))
@@ -37,15 +37,7 @@ dialStream hostType ctx@Context{outputQ, http2settings, streamTable, clientStrea
     strm@Stream{streamPrecedence} <- newStream sid 65535
     prec <- readIORef streamPrecedence
     insert streamTable sid strm
-
-    -- send stream body
-    let is = atomically $ readTQueue 
-    sendQ <- atomically $ newTQueue
-
-    -- register output queue with frame sender
-    let os out = atomically $ writeTQueue sendQ out
-    enqueue outputQ sid prec (OStream sid sendQ)
-    return (is, os)
+    return (readStream strm, writeStream strm)
 
 ----------------------------------------------------------------
 
