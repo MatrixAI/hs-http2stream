@@ -10,14 +10,12 @@ import Data.IORef
 import Control.Concurrent.STM
 import Control.Concurrent
 import qualified Data.ByteString as BS
-import Data.ByteString.Builder (Builder)
-import qualified Data.ByteString.Builder.Extra as B
-import Network.HPACK
+--import Data.ByteString.Builder (Builder)
+--import qualified Data.ByteString.Builder.Extra as B
 import Network.HTTP2
 import Network.HTTP2.Priority
 import Network.Stream.HTTP2.Types
 import Network.Stream.HTTP2.EncodeFrame
-import System.IO.Streams hiding (search)
 import Control.Monad
 
 -- | For a given connection and connection context, receive and process an 
@@ -49,62 +47,63 @@ frameReceiver ctx@Context{..} connReceive = forever $ do
     case fpl of
         -- Receiving a data frame
         -- Pass it to the correct stream
-        DataFrame pl -> do
+        DataFrame fpl' -> do
             -- The stream should have been in the streamTable by this point
             -- TODO: How can we make this total?
-            Just strm@Stream{..} <- search streamTable streamId
+            Just Stream{..} <- search streamTable streamId
             atomically $ modifyTVar' streamWindow (recvLen-)
             state <- readIORef streamState
             case state of
-                Open ins _ -> atomically $ writeTQueue ins pl
-                LocalClosed ins -> atomically $ writeTQueue ins pl
+                Open ins _ -> atomically $ writeTQueue ins fpl'
+                LocalClosed ins -> atomically $ writeTQueue ins fpl'
                 _ -> sendReset StreamClosed streamId
 
-        HeadersFrame mpri hdrblk -> do
+        HeadersFrame _ _ -> do
             -- Need to read the stream headers and make a new stream
             csid <- readIORef clientStreamId
             when (csid > streamId) $ 
                 E.throwIO $ ConnectionError ProtocolError
                             "New client stream identifier must not decrease"
             Settings{initialWindowSize} <- readIORef http2settings 
-            strm@Stream{streamState, streamPrecedence} <- newStream streamId initialWindowSize
-            prec <- readIORef streamPrecedence
+            strm@Stream{} <- newStream streamId initialWindowSize
+            --prec <- readIORef streamPrecedence
             insert streamTable streamId strm
             opened ctx strm
             atomically $ writeTQueue acceptQ (readStream strm, writeStream strm) 
      
-        PriorityFrame pri  -> undefined
-        RSTStreamFrame eid -> undefined
-        SettingsFrame sl   -> sendSettingsAck
-        PushPromiseFrame sid hdrblk -> undefined
-        PingFrame bs -> undefined
-        GoAwayFrame lastStreamId eid bs -> undefined
-        WindowUpdateFrame ws -> undefined
-        ContinuationFrame hdrblk -> undefined
-        -- Unknown frame type, ignore it
-        UnknownFrame ftyp bs -> undefined
+        -- PriorityFrame pri  -> undefined
+        -- RSTStreamFrame eid -> undefined
+        -- SettingsFrame sl   -> sendSettingsAck
+        -- PushPromiseFrame sid hdrblk -> undefined
+        -- PingFrame bs -> undefined
+        -- GoAwayFrame lastStreamId eid bs -> undefined
+        -- WindowUpdateFrame ws -> undefined
+        -- ContinuationFrame hdrblk -> undefined
+        -- -- Unknown frame type, ignore it
+        -- UnknownFrame typ bs -> undefined
+        _ -> undefined
   where
     checkFrameHeader' :: Settings -> (FrameTypeId, FrameHeader) -> IO ()
-    checkFrameHeader' settings (FramePushPromise, _) = 
+    checkFrameHeader' _ (FramePushPromise, _) = 
         E.throwIO $ ConnectionError ProtocolError "push promise is not allowed"
-    checkFrameHeader' settings typhdr@(ftyp, header@FrameHeader{payloadLength}) =
+    checkFrameHeader' settings typhdr@(_, FrameHeader{}) =
         let typhdr' = checkFrameHeader settings typhdr in
         either E.throwIO mempty typhdr'
  
-    sendGoaway e
-      | Just (ConnectionError err msg) <- E.fromException e = do
-          csid <- readIORef clientStreamId
-          let !frame = goawayFrame csid err msg
-          atomically $ writeTQueue controlQ $ CGoaway frame
-      | otherwise = return ()
+    -- sendGoaway e
+    --   | Just (ConnectionError err msg) <- E.fromException e = do
+    --       csid <- readIORef clientStreamId
+    --       let !frame = goawayFrame csid err msg
+    --       atomically $ writeTQueue controlQ $ CGoaway frame
+    --   | otherwise = return ()
 
     sendReset err sid = do
         let !frame = resetFrame err sid
         atomically $ writeTQueue controlQ $ CFrame frame
 
-    sendSettingsAck = do
-        let !ack = settingsFrame setAck []
-        atomically $ writeTQueue controlQ $ CSettings ack []
+    -- sendSettingsAck = do
+    --     let !ack = settingsFrame setAck []
+    --     atomically $ writeTQueue controlQ $ CSettings ack []
 
 
 -- | Evaluate the next stream to send frames for, and then send a data frame
@@ -112,21 +111,19 @@ frameReceiver ctx@Context{..} connReceive = forever $ do
 -- to send on the stream
 -- TODO: Support flow control
 frameSender :: Context -> (BS.ByteString -> IO ()) -> IO ()
-frameSender ctx@Context{controlQ, outputQ, streamTable} connSender = forever $ do
+frameSender ctx@Context{outputQ, streamTable} connSender = forever $ do
     --cframe <- atomically $ tryReadTQueue controlQ
     let cframe = Nothing
-    tid <- myThreadId
     -- TODO: Send control frames first
     case cframe of
         -- Just (CSettings bs _) -> do
-        --     putStrLn $ show tid ++ " frameSender: settings" ++ show cframe
         --     connSender bs
         _ -> do 
             (sid, pre, ostrm) <- dequeue outputQ
             frameSender' sid pre ostrm >>= connSender
   where
     frameSender' sid pre ostrm = case ostrm of
-        OStream sid outs -> do
+        OStream _ _ -> do
             -- Expect the stream to already be inserted or this is an error
             Just strm@Stream{streamState} <- search streamTable sid 
             ss <- readIORef streamState

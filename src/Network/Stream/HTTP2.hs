@@ -6,10 +6,9 @@ module Network.Stream.HTTP2 where
 
 import Data.ByteString (ByteString)
 import Network.HTTP2
-import Network.HTTP2.Priority
-import Network.HPACK
+-- import Network.HTTP2.Priority
+-- import Network.HPACK
 import Data.IORef
-import Data.Tuple.Extra
 
 import Network.Stream.HTTP2.Types
 import Network.Stream.HTTP2.Multiplexer
@@ -21,18 +20,18 @@ import Control.Monad
 
 
 acceptStream :: Context -> IO StreamReaderWriter
-acceptStream ctx@Context{acceptQ} = atomically $ readTQueue acceptQ
+acceptStream Context{acceptQ} = atomically $ readTQueue acceptQ
 
 
 dialStream :: HTTP2HostType -> Context -> IO StreamReaderWriter
-dialStream hostType ctx@Context{outputQ, http2settings, streamTable, clientStreamId, serverStreamId} = do
+dialStream hostType Context{streamTable, clientStreamId, serverStreamId} = do
     sid <- case hostType of
         HServer -> atomicModifyIORef' serverStreamId (\x -> (x+2, x))
         HClient -> atomicModifyIORef' clientStreamId (\x -> (x+2, x))
 
     -- save the stream state
-    strm@Stream{streamPrecedence} <- newStream sid 65535
-    prec <- readIORef streamPrecedence
+    strm@Stream{} <- newStream sid 65535
+    -- prec <- readIORef streamPrecedence
     insert streamTable sid strm
     return (readStream strm, writeStream strm)
 

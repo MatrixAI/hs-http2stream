@@ -16,6 +16,18 @@
 #  name: custom-snapshot
 #  location: "./custom-snapshot.yaml"
 resolver: lts-9.4
+ghc-options:
+    # All packages
+    "$locals": -Wall
+    "$targets": -Werror
+    "$everything": -O2
+
+build:
+    library-profiling: true
+    executable-profiling: true
+    copy-bins: false
+    prefetch: false
+    keep-going: false
 
 # User packages to be built.
 # Various formats can be used as shown in the example below.

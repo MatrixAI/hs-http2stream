@@ -11,7 +11,6 @@ import Data.IORef
 import Control.Concurrent.STM
 import Control.Exception (SomeException)
 import Control.Monad
-import System.IO.Streams
 
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as M
