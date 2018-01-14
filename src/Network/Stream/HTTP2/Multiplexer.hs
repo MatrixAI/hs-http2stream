@@ -36,7 +36,7 @@ frameReceiver ctx@Context{..} connReceive = forever $ do
 
     pl <- connReceive payloadLength
     fpl <- case decodeFramePayload ftyp fhdr pl of
-        Left err -> E.throwIO err
+        Left err  -> E.throwIO err
         Right pl' -> return pl'
  
     tid <- myThreadId
@@ -52,20 +52,20 @@ frameReceiver ctx@Context{..} connReceive = forever $ do
         DataFrame pl -> do
             -- The stream should have been in the streamTable by this point
             -- TODO: How can we make this total?
-            Just strm@(Stream{..}) <- search streamTable streamId
+            Just strm@Stream{..} <- search streamTable streamId
             atomically $ modifyTVar' streamWindow (recvLen-)
             state <- readIORef streamState
             case state of
                 Open ins _ -> atomically $ writeTQueue ins pl
                 LocalClosed ins -> atomically $ writeTQueue ins pl
-                otherwise -> sendReset StreamClosed streamId
+                _ -> sendReset StreamClosed streamId
 
         HeadersFrame mpri hdrblk -> do
             -- Need to read the stream headers and make a new stream
             csid <- readIORef clientStreamId
-            when (csid > streamId) $ do
+            when (csid > streamId) $ 
                 E.throwIO $ ConnectionError ProtocolError
-                          $ "New client stream identifier must not decrease"
+                            "New client stream identifier must not decrease"
             Settings{initialWindowSize} <- readIORef http2settings 
             strm@Stream{streamState, streamPrecedence} <- newStream streamId initialWindowSize
             prec <- readIORef streamPrecedence
@@ -73,10 +73,9 @@ frameReceiver ctx@Context{..} connReceive = forever $ do
             opened ctx strm
             atomically $ writeTQueue acceptQ (readStream strm, writeStream strm) 
      
-        PriorityFrame pri -> undefined
+        PriorityFrame pri  -> undefined
         RSTStreamFrame eid -> undefined
-        SettingsFrame sl -> do
-            sendSettingsAck
+        SettingsFrame sl   -> sendSettingsAck
         PushPromiseFrame sid hdrblk -> undefined
         PingFrame bs -> undefined
         GoAwayFrame lastStreamId eid bs -> undefined
@@ -86,7 +85,7 @@ frameReceiver ctx@Context{..} connReceive = forever $ do
         UnknownFrame ftyp bs -> undefined
   where
     checkFrameHeader' :: Settings -> (FrameTypeId, FrameHeader) -> IO ()
-    checkFrameHeader' settings (FramePushPromise, _) = do
+    checkFrameHeader' settings (FramePushPromise, _) = 
         E.throwIO $ ConnectionError ProtocolError "push promise is not allowed"
     checkFrameHeader' settings typhdr@(ftyp, header@FrameHeader{payloadLength}) =
         let typhdr' = checkFrameHeader settings typhdr in
@@ -117,11 +116,12 @@ frameSender ctx@Context{controlQ, outputQ, streamTable} connSender = forever $ d
     --cframe <- atomically $ tryReadTQueue controlQ
     let cframe = Nothing
     tid <- myThreadId
+    -- TODO: Send control frames first
     case cframe of
         -- Just (CSettings bs _) -> do
         --     putStrLn $ show tid ++ " frameSender: settings" ++ show cframe
         --     connSender bs
-        otherwise -> do 
+        _ -> do 
             (sid, pre, ostrm) <- dequeue outputQ
             frameSender' sid pre ostrm >>= connSender
   where
@@ -136,15 +136,14 @@ frameSender ctx@Context{controlQ, outputQ, streamTable} connSender = forever $ d
                 Idle -> sendHeaders sid strm
                 Open _ outs -> send sid outs
                 RemoteClosed outs -> send sid outs
-                otherwise -> undefined -- TODO: need to make this a 
+                _ -> undefined -- TODO: need to make this a 
                                        -- compile error so that this can't
                                        -- happen
-    send sid outs = do
-        (atomically $ readTQueue outs) >>= \out -> 
-            let (out', flags) = case out of
-                    Nothing -> ("", setEndStream)
-                    Just bs -> (bs, id)
-            in return $ encodeFrame (encodeInfo flags sid) (DataFrame out')
+    send sid outs = atomically $ readTQueue outs >>= \out -> 
+        let (out', flags) = case out of
+                Nothing -> ("", setEndStream)
+                Just bs -> (bs, id)
+        in return $ encodeFrame (encodeInfo flags sid) (DataFrame out')
 
     sendHeaders sid strm = do
         -- TODO: Header List packing needs to occur here, may need to

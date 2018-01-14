@@ -1,4 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -22,9 +21,7 @@ import Control.Monad
 
 
 acceptStream :: Context -> IO StreamReaderWriter
-acceptStream ctx@Context{acceptQ} = do
-    sp <- atomically $ readTQueue acceptQ
-    return sp
+acceptStream ctx@Context{acceptQ} = atomically $ readTQueue acceptQ
 
 
 dialStream :: HTTP2HostType -> Context -> IO StreamReaderWriter

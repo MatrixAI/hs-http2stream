@@ -1,6 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE RecordWildCards #-}
 
 module Network.Stream.HTTP2.Types where
 
@@ -52,7 +51,7 @@ data Control = CFinish
 
 data Output = OStream !StreamId !(TQueue ByteString)
 
-instance Show (Output) where
+instance Show Output where
   show (OStream sid _) = "OStream StreamId " ++ show sid
 
 newContext :: IO Context
@@ -162,21 +161,22 @@ newPushStream Context{serverStreamId} win pre = do
 readStream :: Stream -> IO ByteString
 readStream Stream{streamNumber, streamState} = do
     ss <- readIORef streamState
-    bs <- case ss of
-            Open ins _ -> atomically $ readTQueue ins
-            LocalClosed ins -> atomically $ readTQueue ins
-            -- This shouldn't happen
-            otherwise -> E.throwIO $ StreamError InternalError streamNumber
-    return bs
+    case ss of
+        Open ins _ -> atomically $ readTQueue ins
+        LocalClosed ins -> atomically $ readTQueue ins
+        -- This shouldn't happen
+        -- TODO: this really needs to be made a compile error
+        _ -> E.throwIO $ StreamError InternalError streamNumber
 
-writeStream :: Stream -> (Maybe ByteString) -> IO ()
+writeStream :: Stream -> Maybe ByteString -> IO ()
 writeStream Stream{streamNumber, streamState} bs = do
     ss <- readIORef streamState
     case ss of
         Open _ outs -> atomically $ writeTQueue outs bs
         RemoteClosed outs -> atomically $ writeTQueue outs bs
         -- This shouldn't happen
-        otherwise -> E.throwIO $ StreamError InternalError streamNumber
+        -- TODO: this really needs to be made a compile error
+        _ -> E.throwIO $ StreamError InternalError streamNumber
 
 ----------------------------------------------------------------
 
