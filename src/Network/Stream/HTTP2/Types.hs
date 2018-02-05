@@ -1,5 +1,9 @@
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ScopedTypeVariables #-} 
+{-# LANGUAGE GADTs #-}
 
 module Network.Stream.HTTP2.Types where
 
@@ -10,18 +14,18 @@ import Network.HPACK
 import Data.IORef
 import Control.Concurrent.STM
 import Control.Exception (SomeException)
-import Control.Monad
 
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as M
-import qualified Control.Exception as E
-----------------------------------------------------------------
+
+------------------------------------------------------------------
 
 data Context = Context {
   -- HTTP/2 settings received from a browser
-    http2settings      :: !(IORef Settings)
+    http2Settings      :: !(IORef Settings)
   , firstSettings      :: !(IORef Bool)
-  , streamTable        :: !StreamTable
+  , openedStreams      :: !(StreamTable 'Open)
+  , closedStreams      :: !(StreamTable 'Closed)
   , concurrency        :: !(IORef Int)
   , priorityTreeSize   :: !(IORef Int)
   -- | RFC 7540 says "Other frames (from any stream) MUST NOT
@@ -29,10 +33,10 @@ data Context = Context {
   --   frames that might follow". This field is used to implement
   --   this requirement.
   , continued          :: !(IORef (Maybe StreamId))
-  , clientStreamId     :: !(IORef StreamId)
-  , serverStreamId     :: !(IORef StreamId)
+  , hostStreamId       :: !(IORef StreamId)
+  , peerStreamId       :: !(IORef StreamId)
   , inputQ             :: !(TQueue Frame)
-  , acceptQ            :: !(TQueue StreamReaderWriter)
+  , acceptQ            :: !(TQueue (ReadStream, WriteStream))
   , outputQ            :: !(PriorityTree Output)
   , controlQ           :: !(TQueue Control)
   , encodeDynamicTable :: !DynamicTable
@@ -57,6 +61,7 @@ newContext :: IO Context
 newContext = Context <$> newIORef defaultSettings
                      <*> newIORef False
                      <*> newStreamTable
+                     <*> newStreamTable
                      <*> newIORef 0
                      <*> newIORef 0
                      <*> newIORef Nothing
@@ -75,19 +80,11 @@ clearContext _ctx = return ()
 
 ----------------------------------------------------------------
 
--- data OpenState =
-  -- JustOpened
-  -- | Continued [HeaderBlockFragment]
-  --             !Int  -- Total size
-  --             !Int  -- The number of continuation frames
-  --             !Bool -- End of stream
-  --             !Priority
-  -- | NoBody (TokenHeaderList,ValueTable) !Priority
-  -- | HasBody (TokenHeaderList,ValueTable) !Priority
-  -- Body !(TQueue ByteString)
-         -- !(Maybe Int) -- received Content-Length
-         --              -- compared the body length for error checking
-         -- !(IORef Int) -- actual body length
+data StreamState =
+    Idle
+  | Open
+  | Closed
+  deriving Show
 
 data ClosedCode = Finished
                 | Killed
@@ -95,127 +92,58 @@ data ClosedCode = Finished
                 | ResetByMe SomeException
                 deriving Show
 
-data StreamState =
-    Idle
-  | Open !(TQueue ByteString) !(TQueue (Maybe ByteString)) -- incoming and outgoing
-  | LocalClosed !(TQueue ByteString)                       -- incoming only 
-  | RemoteClosed !(TQueue (Maybe ByteString))              -- outgoing only
-  | Closed !ClosedCode
-  | Reserved
+data Stream (a :: StreamState) where
+  OpenStream   :: { context     :: !Context
+                  , streamId    :: !StreamId
+                  , precedence  :: !(IORef Precedence)
+                  , window      :: !(TVar WindowSize)
+                  , readStream  :: ReadStream
+                  , writeStream :: WriteStream
+                  } -> Stream 'Open
+  ClosedStream :: StreamId -> ClosedCode -> Stream 'Closed
 
-isIdle :: StreamState -> Bool
-isIdle Idle = True
-isIdle _    = False
+openStream :: Context -> StreamId -> WindowSize -> IO (Stream 'Open)
+openStream ctx sid win = OpenStream ctx sid <$> newIORef defaultPrecedence 
+                                            <*> newTVarIO win
+                                            <*> newTQueueIO
+                                            <*> newTQueueIO
 
-isOpen :: StreamState -> Bool
-isOpen Open{} = True
-isOpen _      = False
+closeStream :: StreamId -> ClosedCode -> Stream 'Closed
+closeStream = ClosedStream
 
-isLocalClosed :: StreamState -> Bool
-isLocalClosed LocalClosed{} = True
-isLocalClosed _             = False
-
-isRemoteClosed :: StreamState -> Bool
-isRemoteClosed RemoteClosed{} = True
-isRemoteClosed _              = False
-
-isClosed :: StreamState -> Bool
-isClosed Closed{} = True
-isClosed _        = False
-
-instance Show StreamState where
-    show Idle           = "Idle"
-    show Open{}         = "Open"
-    show LocalClosed{}  = "LocalClosed"
-    show RemoteClosed{} = "RemoteClosed"
-    show (Closed e)     = "Closed: " ++ show e
-    show Reserved       = "Reserved"
+-- TODO: support push streams
+-- newPushStream :: Context -> WindowSize -> Precedence -> IO (Stream ('Right 'Open))
+-- newPushStream Context{hostStreamId} win pre = do
+--     sid <- atomicModifyIORef' hostStreamId inc2
+--     IdleStream <$> newStreamInfo sid win pre
+--   where
+--     inc2 x = let !x' = x + 2 in (x', x')
 
 ----------------------------------------------------------------
 
-data Stream = Stream {
-    streamNumber     :: !StreamId
-  , streamState      :: !(IORef StreamState)
-  , streamWindow     :: !(TVar WindowSize)
-  , streamPrecedence :: !(IORef Precedence)
-  }
+newtype StreamTable a = StreamTable (IORef (IntMap (Stream a)))
 
-instance Show Stream where
-  show s = show (streamNumber s)
-
-newStream :: StreamId -> WindowSize -> IO Stream
-newStream sid win = Stream sid <$> newIORef Idle
-                               <*> newTVarIO win
-                               <*> newIORef defaultPrecedence
-
-newPushStream :: Context -> WindowSize -> Precedence -> IO Stream
-newPushStream Context{serverStreamId} win pre = do
-    sid <- atomicModifyIORef' serverStreamId inc2
-    Stream sid <$> newIORef Reserved
-               <*> newTVarIO win
-               <*> newIORef pre
-  where
-    inc2 x = let !x' = x + 2 in (x', x')
-
-readStream :: Stream -> IO ByteString
-readStream Stream{streamNumber, streamState} = do
-    ss <- readIORef streamState
-    case ss of
-        Open ins _ -> atomically $ readTQueue ins
-        LocalClosed ins -> atomically $ readTQueue ins
-        -- This shouldn't happen
-        -- TODO: this really needs to be made a compile error
-        _ -> E.throwIO $ StreamError InternalError streamNumber
-
-writeStream :: Stream -> Maybe ByteString -> IO ()
-writeStream Stream{streamNumber, streamState} bs = do
-    ss <- readIORef streamState
-    case ss of
-        Open _ outs -> atomically $ writeTQueue outs bs
-        RemoteClosed outs -> atomically $ writeTQueue outs bs
-        -- This shouldn't happen
-        -- TODO: this really needs to be made a compile error
-        _ -> E.throwIO $ StreamError InternalError streamNumber
-
-----------------------------------------------------------------
-
-opened :: Context -> Stream -> IO ()
-opened Context{concurrency} Stream{streamState} = do
-    atomicModifyIORef' concurrency (\x -> (x+1,()))
-    ins <- newTQueueIO
-    outs <- newTQueueIO
-    writeIORef streamState (Open ins outs)
-
-closed :: Context -> Stream -> ClosedCode -> IO ()
-closed Context{concurrency,streamTable} Stream{streamState,streamNumber} cc = do
-    remove streamTable streamNumber
-    atomicModifyIORef' concurrency (\x -> (x-1,()))
-    writeIORef streamState (Closed cc) -- anyway
-
-----------------------------------------------------------------
-
-newtype StreamTable = StreamTable (IORef (IntMap Stream))
-
-newStreamTable :: IO StreamTable
+newStreamTable :: IO (StreamTable a)
 newStreamTable = StreamTable <$> newIORef M.empty
 
-insert :: StreamTable -> M.Key -> Stream -> IO ()
+insert :: StreamTable a -> M.Key -> Stream a -> IO ()
 insert (StreamTable ref) k v = atomicModifyIORef' ref $ \m ->
     let !m' = M.insert k v m
     in (m', ())
 
-remove :: StreamTable -> M.Key -> IO ()
-remove (StreamTable ref) k = atomicModifyIORef' ref $ \m ->
-    let !m' = M.delete k m
-    in (m', ())
+-- remove :: StreamTable -> M.Key -> IO ()
+-- remove (StreamTable ref) k = atomicModifyIORef' ref $ \m ->
+--     let !m' = M.delete k m
+--     in (m', ())
 
-search :: StreamTable -> M.Key -> IO (Maybe Stream)
-search (StreamTable ref) k = M.lookup k <$> readIORef ref
+-- -- search :: StreamTable -> M.Key -> IO (Maybe (Stream a))
+-- -- search (StreamTable ref) k = M.lookup k <$> readIORef ref
 
-updateAllStreamWindow :: (WindowSize -> WindowSize) -> StreamTable -> IO ()
-updateAllStreamWindow adst (StreamTable ref) = do
-    strms <- M.elems <$> readIORef ref
-    forM_ strms $ \strm -> atomically $ modifyTVar (streamWindow strm) adst
+updateAllStreamWindow :: (WindowSize -> WindowSize) -> StreamTable a -> IO ()
+updateAllStreamWindow = undefined
+-- updateAllStreamWindow adst (StreamTable ref) = do
+--      strms <- M.elems <$> readIORef ref
+--      forM_ strms $ \strm -> atomically $ modifyTVar (streamWindow strm) adst
 
 -- {-# INLINE forkAndEnqueueWhenReady #-}
 -- forkAndEnqueueWhenReady :: IO () -> PriorityTree Output -> Output -> Manager -> IO ()
@@ -241,4 +169,5 @@ updateAllStreamWindow adst (StreamTable ref) = do
 ----------------------------------------------------------------
 
 -- functions to read and write from the stream in the IO monad
-type StreamReaderWriter = (IO ByteString, Maybe ByteString -> IO ())
+type ReadStream = TQueue ByteString
+type WriteStream = TQueue (Maybe ByteString)

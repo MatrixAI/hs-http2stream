@@ -19,7 +19,7 @@ resolver: lts-9.4
 ghc-options:
     # All packages
     "$locals": -Wall
-    "$targets": -Werror
+    "$targets": -Wno-incomplete-patterns -Wno-unused-matches -Wno-type-defaults
     "$everything": -O2
 
 build:

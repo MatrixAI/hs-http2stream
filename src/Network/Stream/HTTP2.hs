@@ -1,6 +1,7 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE GADTs #-}
 
 module Network.Stream.HTTP2 where
 
@@ -19,21 +20,17 @@ import Control.Concurrent.STM
 import Control.Monad
 
 
-acceptStream :: Context -> IO StreamReaderWriter
+acceptStream :: Context -> IO (ReadStream, WriteStream)
 acceptStream Context{acceptQ} = atomically $ readTQueue acceptQ
 
 
-dialStream :: HTTP2HostType -> Context -> IO StreamReaderWriter
-dialStream hostType Context{streamTable, clientStreamId, serverStreamId} = do
-    sid <- case hostType of
-        HServer -> atomicModifyIORef' serverStreamId (\x -> (x+2, x))
-        HClient -> atomicModifyIORef' clientStreamId (\x -> (x+2, x))
-
-    -- save the stream state
-    strm@Stream{} <- newStream sid 65535
-    -- prec <- readIORef streamPrecedence
-    insert streamTable sid strm
-    return (readStream strm, writeStream strm)
+dialStream :: Context -> IO (ReadStream, WriteStream)
+dialStream ctx@Context{openedStreams, hostStreamId, http2Settings} = do
+    hsid <- atomicModifyIORef' hostStreamId (\x -> (x+2, x))
+    Settings{initialWindowSize} <- readIORef http2Settings
+    opened@OpenStream{readStream, writeStream} <- openStream ctx hsid initialWindowSize
+    insert openedStreams hsid opened
+    return (readStream, writeStream)
 
 ----------------------------------------------------------------
 
@@ -58,7 +55,7 @@ attachMuxer hostType connRecv connSend = do
     -- frameSender is the main thread because it ensures to send
     -- a goway frame.
     tid2 <- forkIO $ frameSender ctx connSend
-    putStrLn $ show hostType ++ show (tid ,tid2)
+    -- putStrLn $ show hostType ++ show (tid ,tid2)
     return ctx
   where 
     connPreface HServer = do
