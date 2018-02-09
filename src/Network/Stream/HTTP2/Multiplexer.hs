@@ -22,31 +22,6 @@ import Network.Stream.HTTP2.Types
 import Network.Stream.HTTP2.EncodeFrame
 import Control.Monad
 
--- TODO: if the flow control window is exhausted, enqueue a WINDOW_UPDATE
--- frame to renew the window
--- data FrameReceiver where
---     RawHeader              :: ByteString -> FrameReceiver
---     VerifyHeader           :: FrameReceiver Settings -> (FrameTypeId, FrameHeader) -> FrameReceiver
---     ReceiveFramePayload    :: FrameReceiver
---     UpdateConnectionWindow :: Int -> FrameReceiver
---     UpdateStreamWindow     :: StreamId -> Int -> FrameReceiver
---     UpdateSettings         :: FrameReceiver -> FrameReceiver
---     ControlPayload         :: FramePayload -> FrameReceiver
---     StreamPayload          :: StreamId -> FramePayload -> FrameReceiver
---     Loop                   :: FrameReceiver
---     OnConnectionError      :: HTTP2Error -> FrameReceiver
---     OnStreamError          :: HTTP2Error -> FrameReceiver
-
--- checkHeader :: FrameReceiver -> FrameReceiver
--- checkHeader (FrameReceiver rawhdr) = checkHeader . verifyHeader . decodeFrameHeader rawhdr
--- checkHeader (VerifyHeader (ReceiverSettings s) typhdr) = case ehdr of
---     Left ce@ConnectionError{} -> OnConnectionError ce
---     Left se@StreamError{}     -> OnStreamError se
---     Right typhdr'             -> ReceiveFramePayload
---   where 
---     ehdr = checkFrameHeader typhdr
---     verifyHeader = VerifyHeader ReceiverSettings
-
 
 frameReceiver :: Context -> (Int -> IO BS.ByteString) -> IO ()
 frameReceiver Context{..} recv = forever $ do
@@ -136,8 +111,8 @@ frameReceiver Context{..} recv = forever $ do
       where
         handleFrame :: FramePayload -> IO ()
         handleFrame (DataFrame dfp) = atomically $ do
-             nextInput inputStream dfp 
-             modifyTVar' window (paylen-) 
+            nextInput inputStream dfp 
+            modifyTVar' window (paylen-) 
         handleFrame SettingsFrame{} = 
             error "This should have been handled by checkFrameHeader"
             
