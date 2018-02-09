@@ -1,5 +1,4 @@
 {-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE GADTs #-}
 
@@ -7,7 +6,7 @@ module Network.Stream.HTTP2 where
 
 import Data.ByteString (ByteString)
 import Network.HTTP2
--- import Network.HTTP2.Priority
+import Network.HTTP2.Priority
 -- import Network.HPACK
 import Data.IORef
 
@@ -19,43 +18,31 @@ import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Monad
 
-
 acceptStream :: Context -> IO (ReadStream, WriteStream)
 acceptStream Context{acceptQ} = atomically $ readTQueue acceptQ
 
-
 dialStream :: Context -> IO (ReadStream, WriteStream)
-dialStream ctx@Context{openedStreams, hostStreamId, http2Settings} = do
+dialStream ctx@Context{outputQ, openedStreams, hostStreamId, http2Settings} = do
     hsid <- atomicModifyIORef' hostStreamId (\x -> (x+2, x))
     Settings{initialWindowSize} <- readIORef http2Settings
-    opened@OpenStream{readStream, writeStream} <- openStream ctx hsid initialWindowSize
+    opened@OpenStream { inputStream
+                      , outputStream
+                      , precedence } <- openStream hsid initialWindowSize
+    pre <- readIORef precedence
     insert openedStreams hsid opened
-    return (readStream, writeStream)
+    enqueue outputQ hsid pre outputStream
+    return (unInput inputStream, unOutput outputStream)
 
 ----------------------------------------------------------------
-
--- Who initiated the p2p connection?
-data HTTP2HostType = HServer | HClient deriving Show
-
-data Config = Config {
-    defaultStreamSize :: WindowSize
-  , hostType :: HTTP2HostType
-  , http2Settings :: Settings
-}
 
 -- Start a thread for receiving frames and sending frames
 -- Does not use the thread pool manager from the Warp implementation
 attachMuxer ::  HTTP2HostType -> (Int -> IO ByteString) -> (ByteString -> IO ()) -> IO Context
 attachMuxer hostType connRecv connSend = do
     connPreface hostType
-    ctx@Context{..} <- newContext
-    -- Receiver
+    ctx@Context{} <- newContext
     tid <- forkIO $ frameReceiver ctx connRecv
-    -- Sender
-    -- frameSender is the main thread because it ensures to send
-    -- a goway frame.
     tid2 <- forkIO $ frameSender ctx connSend
-    -- putStrLn $ show hostType ++ show (tid ,tid2)
     return ctx
   where 
     connPreface HServer = do

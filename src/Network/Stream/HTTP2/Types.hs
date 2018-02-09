@@ -1,9 +1,8 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE ScopedTypeVariables #-} 
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE KindSignatures #-}
 
 module Network.Stream.HTTP2.Types where
 
@@ -14,9 +13,36 @@ import Network.HPACK
 import Data.IORef
 import Control.Concurrent.STM
 import Control.Exception (SomeException)
+import Control.Monad
+
 
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as M
+
+-- These are the types that are exposed in the library API --
+newtype ReadStream = ReadStream { unReadStream :: TQueue ByteString }
+streamRead :: ReadStream -> STM ByteString
+streamRead (ReadStream rs) = readTQueue rs
+
+newtype WriteStream = WriteStream { unWriteStream :: TQueue ByteString }
+streamWrite :: WriteStream -> ByteString -> STM ()
+streamWrite (WriteStream ws)= writeTQueue ws
+
+-- These types are used internally by the frame receiver and sender --
+-- You can think of the control flow like:
+-- frameReceiver -> Input ~ ReadStream -> readStream
+-- writeStream -> WriteStream ~ Output -> frameSender
+-- so Input represents the side of the stream that frameReceiver writes into
+-- and ReadStream represents reading from API land (through streamRead) and
+-- vice versa
+
+newtype Input = Input { unInput :: ReadStream }
+nextInput :: Input -> ByteString -> STM ()
+nextInput = writeTQueue . unReadStream . unInput
+
+newtype Output = Output { unOutput :: WriteStream }
+nextOutput :: Output -> STM ByteString
+nextOutput = readTQueue . unWriteStream . unOutput
 
 ------------------------------------------------------------------
 
@@ -52,10 +78,16 @@ data Control = CFinish
              | CSettings0 !ByteString !ByteString !SettingsList
              deriving Show
 
-data Output = OStream !StreamId !(TQueue ByteString)
+{-# INLINE enqueueControl #-}
+enqueueControl :: TQueue Control -> Control -> IO ()
+enqueueControl ctlQ = atomically . writeTQueue ctlQ
 
-instance Show Output where
-  show (OStream sid _) = "OStream StreamId " ++ show sid
+type Accept = (ReadStream, WriteStream)
+
+{-# INLINE enqueueAccept #-}
+enqueueAccept :: TQueue Accept -> 
+                 Accept -> IO ()
+enqueueAccept acceptQ = atomically . writeTQueue acceptQ
 
 newContext :: IO Context
 newContext = Context <$> newIORef defaultSettings
@@ -93,20 +125,19 @@ data ClosedCode = Finished
                 deriving Show
 
 data Stream (a :: StreamState) where
-  OpenStream   :: { context     :: !Context
-                  , streamId    :: !StreamId
-                  , precedence  :: !(IORef Precedence)
-                  , window      :: !(TVar WindowSize)
-                  , readStream  :: ReadStream
-                  , writeStream :: WriteStream
+  OpenStream   :: { streamId     :: !StreamId
+                  , precedence   :: !(IORef Precedence)
+                  , window       :: !(TVar WindowSize)
+                  , inputStream  :: Input
+                  , outputStream :: Output
                   } -> Stream 'Open
   ClosedStream :: StreamId -> ClosedCode -> Stream 'Closed
 
-openStream :: Context -> StreamId -> WindowSize -> IO (Stream 'Open)
-openStream ctx sid win = OpenStream ctx sid <$> newIORef defaultPrecedence 
-                                            <*> newTVarIO win
-                                            <*> newTQueueIO
-                                            <*> newTQueueIO
+openStream :: StreamId -> WindowSize -> IO (Stream 'Open)
+openStream sid win = OpenStream sid <$> newIORef defaultPrecedence 
+                                    <*> newTVarIO win
+                                    <*> (Input . ReadStream <$> newTQueueIO)
+                                    <*> (Output . WriteStream <$> newTQueueIO)
 
 closeStream :: StreamId -> ClosedCode -> Stream 'Closed
 closeStream = ClosedStream
@@ -136,38 +167,13 @@ insert (StreamTable ref) k v = atomicModifyIORef' ref $ \m ->
 --     let !m' = M.delete k m
 --     in (m', ())
 
--- -- search :: StreamTable -> M.Key -> IO (Maybe (Stream a))
--- -- search (StreamTable ref) k = M.lookup k <$> readIORef ref
+search :: StreamTable a -> M.Key -> IO (Maybe (Stream a))
+search (StreamTable ref) k = M.lookup k <$> readIORef ref
 
-updateAllStreamWindow :: (WindowSize -> WindowSize) -> StreamTable a -> IO ()
-updateAllStreamWindow = undefined
--- updateAllStreamWindow adst (StreamTable ref) = do
---      strms <- M.elems <$> readIORef ref
---      forM_ strms $ \strm -> atomically $ modifyTVar (streamWindow strm) adst
-
--- {-# INLINE forkAndEnqueueWhenReady #-}
--- forkAndEnqueueWhenReady :: IO () -> PriorityTree Output -> Output -> Manager -> IO ()
--- forkAndEnqueueWhenReady wait outQ out mgr = bracket setup teardown $ \_ ->
---     void . forkIO $ do
---         wait
---         enqueueOutput outQ out
---   where
---     setup = addMyId mgr
---     teardown _ = deleteMyId mgr
-
--- {-# INLINE enqueueOutput #-}
--- enqueueOutput :: PriorityTree Output -> Output -> IO ()
--- enqueueOutput outQ out = do
---     let Stream{..} = outputStream out
---     pre <- readIORef streamPrecedence
---     enqueue outQ streamNumber pre out
-
--- {-# INLINE enqueueControl #-}
--- enqueueControl :: TQueue Control -> Control -> IO ()
--- enqueueControl ctlQ ctl = atomically $ writeTQueue ctlQ ctl
+updateAllStreamWindow :: (WindowSize -> WindowSize) -> StreamTable 'Open -> IO ()
+updateAllStreamWindow adst (StreamTable ref) = do
+    strms <- M.elems <$> readIORef ref
+    forM_ strms $ \strm -> atomically $ modifyTVar (window strm) adst
 
 ----------------------------------------------------------------
-
--- functions to read and write from the stream in the IO monad
-type ReadStream = TQueue ByteString
-type WriteStream = TQueue (Maybe ByteString)
+data HTTP2HostType = HClient | HServer deriving Show

@@ -24,38 +24,50 @@ import Control.Monad
 
 -- TODO: if the flow control window is exhausted, enqueue a WINDOW_UPDATE
 -- frame to renew the window
+-- data FrameReceiver where
+--     RawHeader              :: ByteString -> FrameReceiver
+--     VerifyHeader           :: FrameReceiver Settings -> (FrameTypeId, FrameHeader) -> FrameReceiver
+--     ReceiveFramePayload    :: FrameReceiver
+--     UpdateConnectionWindow :: Int -> FrameReceiver
+--     UpdateStreamWindow     :: StreamId -> Int -> FrameReceiver
+--     UpdateSettings         :: FrameReceiver -> FrameReceiver
+--     ControlPayload         :: FramePayload -> FrameReceiver
+--     StreamPayload          :: StreamId -> FramePayload -> FrameReceiver
+--     Loop                   :: FrameReceiver
+--     OnConnectionError      :: HTTP2Error -> FrameReceiver
+--     OnStreamError          :: HTTP2Error -> FrameReceiver
+
+-- checkHeader :: FrameReceiver -> FrameReceiver
+-- checkHeader (FrameReceiver rawhdr) = checkHeader . verifyHeader . decodeFrameHeader rawhdr
+-- checkHeader (VerifyHeader (ReceiverSettings s) typhdr) = case ehdr of
+--     Left ce@ConnectionError{} -> OnConnectionError ce
+--     Left se@StreamError{}     -> OnStreamError se
+--     Right typhdr'             -> ReceiveFramePayload
+--   where 
+--     ehdr = checkFrameHeader typhdr
+--     verifyHeader = VerifyHeader ReceiverSettings
+
+
 frameReceiver :: Context -> (Int -> IO BS.ByteString) -> IO ()
-frameReceiver ctx@Context{..} recv = forever $ do
+frameReceiver Context{..} recv = forever $ do
     -- Receive and decode the frame header and payload
-    typhdr@(_,FrameHeader{payloadLength, streamId}) <- decodeFrameHeader 
+    typhdr@(_,FrameHeader{payloadLength, streamId}) <- decodeFrameHeader
                                                     <$> recv frameHeaderLength
 
     readIORef http2Settings >>= checkFrameHeader' typhdr
-
     fpl <- recv payloadLength
     pl <- case uncurry decodeFramePayload typhdr fpl of
         Left err  -> E.throwIO err
         Right pl' -> return pl'
  
     -- Update connection window size by bytes read
-    let recvLen = frameHeaderLength + payloadLength
-    atomically $ modifyTVar' connectionWindow (recvLen-)
+    let frameLen = frameHeaderLength + payloadLength
+    atomically $ modifyTVar' connectionWindow (frameLen-)
 
-    --search streamTable streamId
-    when (isControl streamId) $ control pl
-    pure Nothing >>= \case
-        Just open@OpenStream{} -> goOpen streamId (recvLen, pl) open
-        Just closed@ClosedStream{} -> goClosed streamId closed
-        Nothing -> do
-            psid <- readIORef peerStreamId
-            if streamId > psid
-                then goIdle pl streamId
-                else goClosed streamId (ClosedStream streamId Finished)
+    if isControl streamId
+        then control pl
+        else stream streamId (frameLen, pl)
   where
-    -- received a frame payload on the control stream
-    -- probably connection settings
-    -- need to reply to the first frame of the connection settings
-    -- what should we do?
     control :: FramePayload -> IO ()
     control (SettingsFrame sl) =
         case checkSettingsList sl of
@@ -67,9 +79,19 @@ frameReceiver ctx@Context{..} recv = forever $ do
                 forM_ sl $ \case
                     (SettingsInitialWindowSize, ws') -> 
                         updateAllStreamWindow (\x -> x + ws' - ws) openedStreams
-                    _ -> traceStack "Failed settings control" mzero
+                    _ -> traceStack "Failed settings control" (pure ())
                 atomicWriteIORef http2Settings set'
-                sendSettingsAck
+                sendSettingsAck 
+
+    stream :: StreamId -> (Int, FramePayload) -> IO ()
+    stream sid (frameLen, pl) = 
+        search openedStreams sid >>= \case
+            Just open@OpenStream{} -> goOpen sid (frameLen, pl) open
+            Nothing -> do
+                psid <- readIORef peerStreamId
+                if sid > psid
+                    then goIdle pl sid
+                    else goClosed sid (ClosedStream sid Finished)
 
     checkFrameHeader' :: (FrameTypeId, FrameHeader) -> Settings -> IO ()
     checkFrameHeader' (FramePushPromise, _) _ = 
@@ -87,45 +109,44 @@ frameReceiver ctx@Context{..} recv = forever $ do
 
     sendReset err sid = do
         let !frame = resetFrame err sid
-        atomically $ writeTQueue controlQ $ CFrame frame
+        enqueueControl controlQ $ CFrame frame
 
     sendSettingsAck = do
         let !ack = settingsFrame setAck []
-        atomically $ writeTQueue controlQ $ CSettings ack []
+        enqueueControl controlQ $ CSettings ack []
     
     -- Do we really need to pass the empty IdleStream tag to goIdle?
     goIdle :: FramePayload -> StreamId -> IO ()
-    goIdle (HeadersFrame _ _) sid = do
+    goIdle HeadersFrame{} sid = do
+        cont <- readIORef continued
         -- Need to read the stream headers and make a new stream
         hsid <- readIORef hostStreamId
         when (hsid > sid) $ 
             E.throwIO $ ConnectionError ProtocolError
                         "New host stream identifier must not decrease"
         Settings{initialWindowSize} <- readIORef http2Settings 
-        open@OpenStream{readStream, writeStream} <- openStream ctx sid initialWindowSize
+        open@OpenStream{inputStream, outputStream} <- openStream sid initialWindowSize
         insert openedStreams sid open
-        atomically $ writeTQueue acceptQ (readStream,writeStream)
+        enqueueAccept acceptQ (unInput inputStream, unOutput outputStream)
 
     goIdle _ sid = sendReset ProtocolError sid
 
     goOpen :: StreamId -> (Int, FramePayload) -> Stream 'Open -> IO ()
-    goOpen sid (recvLen, fpl) OpenStream{..} = do
-        cont <- readIORef continued
-        handleFrame fpl
-          where
-            handleFrame :: FramePayload -> IO ()
-            handleFrame (DataFrame dfp) = atomically $ do
-                writeTQueue readStream dfp 
-                modifyTVar' window (recvLen-) 
-            handleFrame (SettingsFrame sl) = 
-                error "This should have been handled by checkFrameHeader"
-                
-            handleFrame (WindowUpdateFrame ws) = 
-                if isControl sid
-                  then
-                    atomically $ modifyTVar' connectionWindow (ws+)
-                  else
-                    atomically $ modifyTVar' window (ws+) 
+    goOpen sid (paylen, fpl) OpenStream{window, inputStream} = handleFrame fpl
+      where
+        handleFrame :: FramePayload -> IO ()
+        handleFrame (DataFrame dfp) = atomically $ do
+             nextInput inputStream dfp 
+             modifyTVar' window (paylen-) 
+        handleFrame SettingsFrame{} = 
+            error "This should have been handled by checkFrameHeader"
+            
+        handleFrame (WindowUpdateFrame ws) = 
+            if isControl sid
+              then
+                atomically $ modifyTVar' connectionWindow (ws+)
+              else
+                atomically $ modifyTVar' window (ws+) 
 
     goClosed :: StreamId -> Stream 'Closed -> IO ()
     goClosed sid _ = sendReset StreamClosed sid
@@ -141,8 +162,8 @@ frameSender Context{controlQ, outputQ} connSender = forever $ do
             dataSender' sid pre ostrm >>= connSender
         _ -> print control
   where
-    dataSender' sid pre ostrm@(OStream _ outs) = do
-        out <- atomically $ readTQueue outs
+    dataSender' sid pre ostrm@Output{} = do
+        out <- atomically $ nextOutput ostrm
         enqueue outputQ sid pre ostrm
         return $ encodeFrame (encodeInfo id sid) (DataFrame out)
 
