@@ -16,8 +16,8 @@ library
   hs-source-dirs:      src
   exposed-modules:     Network.Stream.HTTP2
                      , Network.Stream.HTTP2.Types
-  other-modules:       Network.Stream.HTTP2.EncodeFrame
                      , Network.Stream.HTTP2.Multiplexer
+  other-modules:       Network.Stream.HTTP2.EncodeFrame
   build-depends:       base >= 4.7 && < 5
                      , bytestring
                      , http2
@@ -31,6 +31,7 @@ test-suite test
   type:                exitcode-stdio-1.0
   hs-source-dirs:      test
   main-is:             Spec.hs
+  other-modules:       Network.Stream.HTTP2.Multiplexer
   build-depends:       base >= 4.7 && < 5
                      , bytestring
                      , http2

@@ -50,12 +50,9 @@ attachMuxer hostType connRecv connSend = do
         when (connectionPreface /= preface) $ do
             goaway connSend ProtocolError "Preface mismatch"
             E.throwIO $ ConnectionError ProtocolError "Preface mismatch"
-
-    connPreface HClient = do
-        connSend connectionPreface
-        -- send off an empty settings frame to start the frameReceiver
-        -- on the peer
         connSend $ settingsFrame id []
+
+    connPreface HClient = connSend connectionPreface
 
 -- connClose must not be called here since Run:fork calls it
 goaway :: (ByteString -> IO ()) -> ErrorCodeId -> ByteString -> IO ()

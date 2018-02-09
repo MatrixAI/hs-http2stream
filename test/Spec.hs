@@ -7,7 +7,6 @@ import Network
 import Network.HTTP2
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import Control.Concurrent
 import Control.Concurrent.STM
 import GHC.IO.Handle (Handle)
 import Control.Monad
