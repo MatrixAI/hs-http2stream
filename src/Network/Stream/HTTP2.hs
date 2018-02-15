@@ -18,17 +18,19 @@ import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Monad
 
-acceptStream :: Context -> IO (ReadStream, WriteStream)
-acceptStream Context{acceptQ} = atomically $ readTQueue acceptQ
+acceptStream :: Context -> IO (Input, Output)
+acceptStream Context{peerStreamId, acceptQ} = do 
+    atomically $ readTQueue acceptQ
 
-dialStream :: Context -> IO (ReadStream, WriteStream)
+dialStream :: Context -> IO (Input, Output)
 dialStream ctx@Context{outputQ, openedStreams, hostStreamId, http2Settings} = do
-    hsid <- atomicModifyIORef' hostStreamId (\x -> (x+2, x))
+    hsid <- readTVarIO hostStreamId
     Settings{initialWindowSize} <- readIORef http2Settings
-    opened@OpenStream { inputStream
-                      , outputStream
-                      , precedence } <- openStream hsid initialWindowSize
+    ds@DialStream { inputStream
+                  , outputStream
+                  , precedence } <- dial hsid initialWindowSize
     pre <- readIORef precedence
+    atomically $ modifyTVar' hostStreamId (+2)
     insert openedStreams hsid opened
     enqueue outputQ hsid pre outputStream
     return (unInput inputStream, unOutput outputStream)
@@ -37,14 +39,24 @@ dialStream ctx@Context{outputQ, openedStreams, hostStreamId, http2Settings} = do
 
 -- Start a thread for receiving frames and sending frames
 -- Does not use the thread pool manager from the Warp implementation
-attachMuxer ::  HTTP2HostType -> (Int -> IO ByteString) -> (ByteString -> IO ()) -> IO Context
+attachMuxer :: HTTP2HostType -> (Int -> IO ByteString) -> (ByteString -> IO ()) -> IO Context
 attachMuxer hostType connRecv connSend = do
     connPreface hostType
     ctx@Context{} <- newContext
+    case hostType of 
+        HClient -> updateHostPeerIds ctx 1 2
+        HServer -> updateHostPeerIds ctx 2 1
     tid <- forkIO $ frameReceiver ctx connRecv
     tid2 <- forkIO $ frameSender ctx connSend
     return ctx
-  where 
+  where
+    -- Set the stored host and peer stream id depending on whether we are a 
+    -- client or a server
+    updateHostPeerIds Context{hostStreamId, peerStreamId} hid pid = 
+      atomically $ do
+        modifyTVar' hostStreamId $ const hid
+        modifyTVar' peerStreamId $ const pid
+    
     connPreface HServer = do
         preface <- connRecv connectionPrefaceLength
         when (connectionPreface /= preface) $ do

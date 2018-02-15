@@ -3,6 +3,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Network.Stream.HTTP2.Types where
 
@@ -15,34 +16,22 @@ import Control.Concurrent.STM
 import Control.Exception (SomeException)
 import Control.Monad
 
-
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as M
 
--- These are the types that are exposed in the library API --
-newtype ReadStream = ReadStream { unReadStream :: TQueue ByteString }
-streamRead :: ReadStream -> STM ByteString
-streamRead (ReadStream rs) = readTQueue rs
+-----------------------------------------------------------------
 
-newtype WriteStream = WriteStream { unWriteStream :: TQueue ByteString }
-streamWrite :: WriteStream -> ByteString -> STM ()
-streamWrite (WriteStream ws)= writeTQueue ws
+type Input = TQueue ByteString
+enqueueInput :: Input -> ByteString -> STM ()
+enqueueInput = writeTQueue 
 
--- These types are used internally by the frame receiver and sender --
--- You can think of the control flow like:
--- frameReceiver -> Input ~ ReadStream -> readStream
--- writeStream -> WriteStream ~ Output -> frameSender
--- so Input represents the side of the stream that frameReceiver writes into
--- and ReadStream represents reading from API land (through streamRead) and
--- vice versa
-
-newtype Input = Input { unInput :: ReadStream }
-nextInput :: Input -> ByteString -> STM ()
-nextInput = writeTQueue . unReadStream . unInput
-
-newtype Output = Output { unOutput :: WriteStream }
-nextOutput :: Output -> STM ByteString
-nextOutput = readTQueue . unWriteStream . unOutput
+-- TODO: OHeader should provide a ByteString builder 
+-- so that we can do header continuation encoding
+-- Also why is the bytestring building in the frame builder not using
+-- strict-bytestring-builder?
+data Output = OHeader (DynamicTable -> IO ByteString)
+            | OStream (TQueue ByteString) 
+            | OEndStream 
 
 ------------------------------------------------------------------
 
@@ -51,7 +40,6 @@ data Context = Context {
     http2Settings      :: !(IORef Settings)
   , firstSettings      :: !(IORef Bool)
   , openedStreams      :: !(StreamTable 'Open)
-  , closedStreams      :: !(StreamTable 'Closed)
   , concurrency        :: !(IORef Int)
   , priorityTreeSize   :: !(IORef Int)
   -- | RFC 7540 says "Other frames (from any stream) MUST NOT
@@ -62,7 +50,7 @@ data Context = Context {
   , hostStreamId       :: !(IORef StreamId)
   , peerStreamId       :: !(IORef StreamId)
   , inputQ             :: !(TQueue Frame)
-  , acceptQ            :: !(TQueue (ReadStream, WriteStream))
+  , acceptQ            :: !(TQueue (Input, Output))
   , outputQ            :: !(PriorityTree Output)
   , controlQ           :: !(TQueue Control)
   , encodeDynamicTable :: !DynamicTable
@@ -78,21 +66,9 @@ data Control = CFinish
              | CSettings0 !ByteString !ByteString !SettingsList
              deriving Show
 
-{-# INLINE enqueueControl #-}
-enqueueControl :: TQueue Control -> Control -> IO ()
-enqueueControl ctlQ = atomically . writeTQueue ctlQ
-
-type Accept = (ReadStream, WriteStream)
-
-{-# INLINE enqueueAccept #-}
-enqueueAccept :: TQueue Accept -> 
-                 Accept -> IO ()
-enqueueAccept acceptQ = atomically . writeTQueue acceptQ
-
 newContext :: IO Context
 newContext = Context <$> newIORef defaultSettings
                      <*> newIORef False
-                     <*> newStreamTable
                      <*> newStreamTable
                      <*> newIORef 0
                      <*> newIORef 0
@@ -108,9 +84,24 @@ newContext = Context <$> newIORef defaultSettings
                      <*> newTVarIO defaultInitialWindowSize
 
 clearContext :: Context -> IO ()
-clearContext _ctx = return ()
+clearContext ctx = return ()
 
 ----------------------------------------------------------------
+
+data Stream (a :: StreamState) where
+  DialStream   :: { streamId     :: !StreamId
+                  , precedence   :: !(IORef Precedence)
+                  , window       :: !(TVar WindowSize)
+                  , inputStream  :: Input
+                  , outputStream :: Output
+                  } -> Stream 'Open
+  ListenStream :: { streamId     :: !StreamId
+                  , precedence   :: !(IORef Precedence)
+                  , window       :: !(TVar WindowSize)
+                  , inputStream  :: Input
+                  , outputStream :: Output
+                  } -> Stream 'Open
+  ClosedStream :: StreamId -> ClosedCode -> Stream 'Closed
 
 data StreamState =
     Idle
@@ -124,31 +115,49 @@ data ClosedCode = Finished
                 | ResetByMe SomeException
                 deriving Show
 
-data Stream (a :: StreamState) where
-  OpenStream   :: { streamId     :: !StreamId
-                  , precedence   :: !(IORef Precedence)
-                  , window       :: !(TVar WindowSize)
-                  , inputStream  :: Input
-                  , outputStream :: Output
-                  } -> Stream 'Open
-  ClosedStream :: StreamId -> ClosedCode -> Stream 'Closed
+type OpenStreamConstructor =  StreamId 
+                           -> IORef Precedence -> TVar WindowSize 
+                           -> Input 
+                           -> Output 
+                           -> Stream 'Open
 
-openStream :: StreamId -> WindowSize -> IO (Stream 'Open)
-openStream sid win = OpenStream sid <$> newIORef defaultPrecedence 
-                                    <*> newTVarIO win
-                                    <*> (Input . ReadStream <$> newTQueueIO)
-                                    <*> (Output . WriteStream <$> newTQueueIO)
+makeStream :: OpenStreamConstructor
+           -> StreamId -> WindowSize -> Output -> IO (Stream 'Open)
+makeStream cons sid win hdr = cons sid <$> newIORef defaultPrecedence 
+                                       <*> newTVarIO win
+                                       <*> newTQueueIO
+                                       <*> pure hdr
 
-closeStream :: StreamId -> ClosedCode -> Stream 'Closed
-closeStream = ClosedStream
+accept :: StreamId -> WindowSize -> IO (Stream 'Open)
+accept sid win = makeStream ListenStream 
+                            sid win responseHeader
 
--- TODO: support push streams
--- newPushStream :: Context -> WindowSize -> Precedence -> IO (Stream ('Right 'Open))
--- newPushStream Context{hostStreamId} win pre = do
---     sid <- atomicModifyIORef' hostStreamId inc2
---     IdleStream <$> newStreamInfo sid win pre
---   where
---     inc2 x = let !x' = x + 2 in (x', x')
+dial :: StreamId -> WindowSize -> IO (Stream 'Open)
+dial sid win = makeStream DialStream 
+                          sid win requestHeader
+
+close :: StreamId -> ClosedCode -> Stream 'Closed
+close = ClosedStream
+
+----------------------------------------------------------------
+
+makeHeader :: HeaderList -> DynamicTable -> IO ByteString
+makeHeader = (flip . defaultHeaderArgs) encodeHeader
+  where
+    defaultHeaderArgs :: (EncodeStrategy -> Size -> a) -> a
+    defaultHeaderArgs = ($ 256*1024) . ($ defaultEncodeStrategy)
+
+requestHeader :: Output
+requestHeader = OHeader (makeHeader reqhdr) 
+  where
+    reqhdr = [ (":method", "GET")
+             , (":scheme", "ipfs")
+             , (":path", "/") ]
+
+responseHeader :: Output
+responseHeader = OHeader (makeHeader reshdr)
+  where
+    reshdr = [ (":status", "200") ]
 
 ----------------------------------------------------------------
 
@@ -176,4 +185,9 @@ updateAllStreamWindow adst (StreamTable ref) = do
     forM_ strms $ \strm -> atomically $ modifyTVar (window strm) adst
 
 ----------------------------------------------------------------
+
+{-# INLINE enqueueQ #-}
+enqueueQ :: TQueue a -> a -> IO ()
+enqueueQ q = atomically . writeTQueue q
+
 data HTTP2HostType = HClient | HServer deriving Show
