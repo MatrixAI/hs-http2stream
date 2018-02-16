@@ -28,7 +28,7 @@ import Network.Stream.HTTP2.Types
 import Network.Stream.HTTP2.EncodeFrame
 
 frameReceiver :: Context -> (Int -> IO BS.ByteString) -> IO ()
-frameReceiver Context{..} recv = forever $ do
+frameReceiver ctx@Context{..} recv = forever $ do
     -- Receive and decode the frame header and payload
     typhdr@(_, fhdr) <-  decodeFrameHeader
                      <$> recv frameHeaderLength
@@ -102,13 +102,15 @@ frameReceiver Context{..} recv = forever $ do
         psid <- readIORef peerStreamId
         when (psid > sid) $
             E.throwIO $ ConnectionError ProtocolError
-                        "New peer stream identifier must not decrease"
-        modifyIORef' peerStreamId (const sid)
-        Settings {initialWindowSize} <- readIORef http2Settings
-        lstrm@ListenStream {} <- accept sid initialWindowSize
+                       "New peer stream identifier must not decrease"
+        atomicModifyIORef' peerStreamId $ const (sid, ())
+        Settings{initialWindowSize} <- readIORef http2Settings
+        lstrm@ListenStream{precedence} <- lstream sid initialWindowSize
         insert openedStreams sid lstrm
         let rdr = inputStream lstrm
         let wtr = outputStream lstrm
+        pre <- readIORef precedence
+        enqueue outputQ sid pre wtr
         enqueueQ acceptQ (rdr, wtr)
 
     newStream sid _ = sendReset ProtocolError sid
@@ -145,8 +147,15 @@ frameSender Context {controlQ, outputQ, encodeDynamicTable} send = forever $ do
           False -> do
             (sid, pre, ostrm) <- dequeue outputQ
             encodeOutput encodeDynamicTable sid ostrm >>= send
+            enqueue outputQ sid pre =<< nextOutput ostrm
           True -> pure ()
       _ -> traceIO $ show control
+
+nextOutput :: Output -> IO Output
+nextOutput (OHeader mkHdr next) = pure next
+nextOutput (OMkStream mkStrm) = mkStrm
+nextOutput ostrm@OStream{} = pure ostrm
+nextOutput OEndStream = error "We shouldn't be calling nextOutput once done"
 
 encodeOutput :: DynamicTable -> StreamId -> Output -> IO ByteString
 encodeOutput encodeDT sid = runReaderT mkOutput
@@ -160,9 +169,9 @@ encodeOutput encodeDT sid = runReaderT mkOutput
 
     mkPayload :: Output -> ReaderT Output IO ByteString
     mkPayload = \case
-        OHeader mkHdr -> liftIO $ mkHdr encodeDT
-        OStream ostrm -> liftIO . atomically $ readTQueue ostrm
-        OEndStream -> pure ""
+        OHeader mkHdr _ -> liftIO $ mkHdr encodeDT
+        OStream ostrm   -> liftIO . atomically $ readTQueue ostrm
+        OEndStream      -> pure ""
 
     mkFramePayload :: Output -> ByteString -> FramePayload
     mkFramePayload OHeader{} = HeadersFrame Nothing

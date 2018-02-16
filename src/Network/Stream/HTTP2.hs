@@ -18,22 +18,29 @@ import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Monad
 
-acceptStream :: Context -> IO (Input, Output)
-acceptStream Context{peerStreamId, acceptQ} = do 
-    atomically $ readTQueue acceptQ
+acceptStream :: Context -> IO (Maybe (Input, Output))
+acceptStream Context{peerStreamId, acceptQ} = do
+    atomically $ tryReadTQueue acceptQ
 
 dialStream :: Context -> IO (Input, Output)
 dialStream ctx@Context{outputQ, openedStreams, hostStreamId, http2Settings} = do
-    hsid <- readTVarIO hostStreamId
+    hsid <- readIORef hostStreamId
     Settings{initialWindowSize} <- readIORef http2Settings
-    ds@DialStream { inputStream
-                  , outputStream
-                  , precedence } <- dial hsid initialWindowSize
+    dialed@DialStream { inputStream
+                      , outputStream
+                      , precedence } <- dstream hsid initialWindowSize
     pre <- readIORef precedence
-    atomically $ modifyTVar' hostStreamId (+2)
-    insert openedStreams hsid opened
+    atomicModifyIORef' hostStreamId (\x -> (x+2, ()))
+    insert openedStreams hsid dialed
     enqueue outputQ hsid pre outputStream
-    return (unInput inputStream, unOutput outputStream)
+    return (inputStream, outputStream)
+
+writeStream :: Output -> ByteString -> IO ()
+writeStream (OStream ws) bs = atomically $ writeTQueue ws bs
+writeStream (OMkStream mkStrm) bs = join $ writeStream <$> mkStrm
+                                                       <*> pure bs
+writeStream OEndStream _ = error "Can't write to a finished stream"
+
 
 ----------------------------------------------------------------
 
@@ -52,10 +59,9 @@ attachMuxer hostType connRecv connSend = do
   where
     -- Set the stored host and peer stream id depending on whether we are a 
     -- client or a server
-    updateHostPeerIds Context{hostStreamId, peerStreamId} hid pid = 
-      atomically $ do
-        modifyTVar' hostStreamId $ const hid
-        modifyTVar' peerStreamId $ const pid
+    updateHostPeerIds Context{hostStreamId, peerStreamId} hid pid = do
+        atomicModifyIORef' hostStreamId $ const (hid, ())
+        atomicModifyIORef' peerStreamId $ const (pid, ())
     
     connPreface HServer = do
         preface <- connRecv connectionPrefaceLength

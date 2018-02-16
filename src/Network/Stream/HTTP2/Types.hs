@@ -29,9 +29,16 @@ enqueueInput = writeTQueue
 -- so that we can do header continuation encoding
 -- Also why is the bytestring building in the frame builder not using
 -- strict-bytestring-builder?
-data Output = OHeader (DynamicTable -> IO ByteString)
+data Output = OHeader (DynamicTable -> IO ByteString) Output
+            | OMkStream (IO Output)
             | OStream (TQueue ByteString) 
             | OEndStream 
+
+instance Show Output where
+  show OHeader{} = "OHeader"
+  show OMkStream{} = "OMkStream"
+  show OStream{} = "OStream"
+  show OEndStream{} = "OEndStream"
 
 ------------------------------------------------------------------
 
@@ -121,23 +128,26 @@ type OpenStreamConstructor =  StreamId
                            -> Output 
                            -> Stream 'Open
 
+-- TODO: Limit makeStream to a function that only builds streams
+-- with headers
 makeStream :: OpenStreamConstructor
            -> StreamId -> WindowSize -> Output -> IO (Stream 'Open)
-makeStream cons sid win hdr = cons sid <$> newIORef defaultPrecedence 
+makeStream cons sid win out = cons sid <$> newIORef defaultPrecedence 
                                        <*> newTVarIO win
                                        <*> newTQueueIO
-                                       <*> pure hdr
+                                       <*> pure out
 
-accept :: StreamId -> WindowSize -> IO (Stream 'Open)
-accept sid win = makeStream ListenStream 
-                            sid win responseHeader
+lstream :: StreamId -> WindowSize -> IO (Stream 'Open)
+lstream sid win = makeStream ListenStream 
+                             sid win responseHeader
 
-dial :: StreamId -> WindowSize -> IO (Stream 'Open)
-dial sid win = makeStream DialStream 
-                          sid win requestHeader
+dstream :: StreamId -> WindowSize -> IO (Stream 'Open)
+dstream sid win = makeStream DialStream 
+                             sid win requestHeader
 
-close :: StreamId -> ClosedCode -> Stream 'Closed
-close = ClosedStream
+
+closeStream :: StreamId -> ClosedCode -> Stream 'Closed
+closeStream = ClosedStream
 
 ----------------------------------------------------------------
 
@@ -148,16 +158,19 @@ makeHeader = (flip . defaultHeaderArgs) encodeHeader
     defaultHeaderArgs = ($ 256*1024) . ($ defaultEncodeStrategy)
 
 requestHeader :: Output
-requestHeader = OHeader (makeHeader reqhdr) 
+requestHeader = OHeader (makeHeader reqhdr) makeOutputStream
   where
     reqhdr = [ (":method", "GET")
              , (":scheme", "ipfs")
              , (":path", "/") ]
 
 responseHeader :: Output
-responseHeader = OHeader (makeHeader reshdr)
+responseHeader = OHeader (makeHeader reshdr) makeOutputStream
   where
     reshdr = [ (":status", "200") ]
+
+makeOutputStream :: Output
+makeOutputStream = OMkStream (OStream <$> newTQueueIO)
 
 ----------------------------------------------------------------
 

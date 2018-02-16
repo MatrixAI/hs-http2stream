@@ -25,7 +25,7 @@ main :: IO ()
 main = do
     sck <- listenOn (PortNumber 27001)
     (hdl, _, _) <- accept sck
-    listener hdl
+    listener hdl 
 
 -- test1 :: IO ()
 -- test1 = do
@@ -42,10 +42,9 @@ dialer hdl = do
     ctx <- attachMuxer HClient (debugReceiver HClient hdl) (debugSender HClient hdl) 
     (_, w) <- dialStream ctx
     (_, w2) <- dialStream ctx
-    atomically $ do
-        streamWrite w2 "The quick brown fox jumps over the lazy dog"
-        streamWrite w "asdf"
-        streamWrite w "asdf2"
+    writeStream w2 "The quick brown fox jumps over the lazy dog"
+    writeStream w "asdf"
+    writeStream w "asdf2"
 
 listener :: Handle -> IO ()
 listener hdl = do
@@ -67,4 +66,5 @@ debugSender ht hdl bs = do
     when (BS.length bs == 9) $ 
         traceIO .show $ decodeFrameHeader bs
     traceStack (show ht ++ " Send CallStack " ++ show bs) (pure ())
+    BS.hPut hdl bs
 
