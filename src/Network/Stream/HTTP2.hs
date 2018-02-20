@@ -46,19 +46,26 @@ writeStream OEndStream _ = error "Can't write to a finished stream"
 
 -- Start a thread for receiving frames and sending frames
 -- Does not use the thread pool manager from the Warp implementation
-attachMuxer :: HTTP2HostType -> (Int -> IO ByteString) -> (ByteString -> IO ()) -> IO Context
-attachMuxer hostType connRecv connSend = do
+attachMuxer :: HTTP2HostType 
+            -> ThreadId
+            -> (Int -> IO ByteString) -> (ByteString -> IO ()) 
+            -> IO Context
+attachMuxer hostType mtid connRecv connSend  = do
     connPreface hostType
     ctx@Context{} <- newContext
     case hostType of 
         HClient -> updateHostPeerIds ctx 1 2
         HServer -> updateHostPeerIds ctx 2 1
-    tid <- forkIO $ frameReceiver ctx connRecv
-    tid2 <- forkIO $ frameSender ctx connSend
+    forkIO $ frameReceiver ctx connRecv `E.catch` throwOut
+    forkIO $ frameSender ctx connSend `E.catch` throwOut
     return ctx
   where
     -- Set the stored host and peer stream id depending on whether we are a 
     -- client or a server
+    throwOut :: HTTP2Error -> IO ()
+    throwOut e@(ConnectionError ec bs) = do 
+        goaway connSend ec bs 
+        E.throwTo mtid e
     updateHostPeerIds Context{hostStreamId, peerStreamId} hid pid = do
         atomicModifyIORef' hostStreamId $ const (hid, ())
         atomicModifyIORef' peerStreamId $ const (pid, ())

@@ -24,33 +24,35 @@ import Network.HPACK
 import Network.HTTP2.Priority
 import Network.Stream.HTTP2.Types
 
-
 import Network.Stream.HTTP2.EncodeFrame
 
 frameReceiver :: Context -> (Int -> IO BS.ByteString) -> IO ()
 frameReceiver ctx@Context{..} recv = forever $ do
     -- Receive and decode the frame header and payload
-    typhdr@(_, fhdr) <-  decodeFrameHeader
-                     <$> recv frameHeaderLength
+    hdr <- recv frameHeaderLength
+    let typhdr@(_, fhdr) = decodeFrameHeader hdr
     let FrameHeader{payloadLength, streamId} = fhdr
 
-    readIORef http2Settings >>= checkFrameHeader' typhdr
+    if hdr == ""
+      then pure ()
+      else do
+        readIORef http2Settings >>= checkFrameHeader' typhdr
 
-    pl <- if payloadLength > 0
-        then recv payloadLength
-        else pure ""
+        pl <- if payloadLength > 0
+            then recv payloadLength
+            else pure ""
 
-    fpl <- case uncurry decodeFramePayload typhdr pl of
-        Left err -> E.throwIO err
-        Right pl' -> pure pl'
+        fpl <- case uncurry decodeFramePayload typhdr pl of
+            Left err -> E.throwIO err
+            Right pl' -> pure pl'
 
-    -- Update connection window size by bytes read
-    let frameLen = frameHeaderLength + payloadLength
-    atomically $ modifyTVar' connectionWindow (frameLen-)
+        -- Update connection window size by bytes read
+        let frameLen = frameHeaderLength + payloadLength
+        atomically $ modifyTVar' connectionWindow (frameLen-)
 
-    if isControl streamId
-        then control fhdr fpl
-        else stream streamId (frameLen, fpl)
+        if isControl streamId
+            then control fhdr fpl
+            else stream streamId (frameLen, fpl)
   where
     control :: FrameHeader -> FramePayload -> IO ()
     control FrameHeader{flags} (SettingsFrame sl)
@@ -88,7 +90,7 @@ frameReceiver ctx@Context{..} recv = forever $ do
             modifyTVar' win (paylen-)
 
         handleFrame SettingsFrame{} =
-          error "This should have been handled by checkFrameHeader"
+            error "This should have been handled by checkFrameHeader"
 
         handleFrame (WindowUpdateFrame ws) =
           if isControl sid
@@ -98,11 +100,11 @@ frameReceiver ctx@Context{..} recv = forever $ do
     newStream :: StreamId -> FramePayload -> IO ()
     newStream sid HeadersFrame{} = do
         cont <- readIORef continued
-          -- Need to read the stream headers and make a new stream
+        -- Need to read the stream headers and make a new stream
         psid <- readIORef peerStreamId
         when (psid > sid) $
             E.throwIO $ ConnectionError ProtocolError
-                       "New peer stream identifier must not decrease"
+                        "New peer stream identifier must not decrease"
         atomicModifyIORef' peerStreamId $ const (sid, ())
         Settings{initialWindowSize} <- readIORef http2Settings
         lstrm@ListenStream{precedence} <- lstream sid initialWindowSize
@@ -121,6 +123,7 @@ frameReceiver ctx@Context{..} recv = forever $ do
     checkFrameHeader' typhdr@(_, FrameHeader {}) settings =
         let typhdr' = checkFrameHeader settings typhdr
         in either E.throwIO mempty typhdr'
+
 
     sendGoaway e = case E.fromException e of
         Just (ConnectionError err msg) -> do
