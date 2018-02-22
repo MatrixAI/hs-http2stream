@@ -1,18 +1,21 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-import Network.Stream.HTTP2
-import Network.Stream.HTTP2.Types
+import Control.Concurrent
+import Control.Concurrent.STM
+import Control.Exception
+import Control.Monad
+
+import Debug.Trace
+
 import Network
 import Network.HTTP2
-import Data.ByteString (ByteString)
-import qualified Data.ByteString as BS
-import Control.Concurrent.STM
-import Control.Monad
-import Control.Concurrent
-import Control.Exception
+import Network.Stream.HTTP2
+import Network.Stream.HTTP2.Types
+
 import System.IO
-import Debug.Trace
+
+----------------------------------------------------------------
 
 -- The dialer in this situation is actually the socket listener
 -- And the listener is the socket dialer
@@ -23,15 +26,15 @@ import Debug.Trace
 -- Likewise, the HTTP2 Listener is actually calling `connect` at the Socket 
 -- level, but receives the connection preface once the socket connection 
 -- has been established.
+
 main :: IO ()
-main = main' `catch` restart
+main = main' `catch` connError
   where
     main' :: IO ()
     main' = bracket acquireConn releaseConn $ \sck ->
         forever . void $ do
             (hdl,_,_) <- accept sck
-            mtid <- myThreadId 
-            Just ctx <- listener hdl mtid
+            ctx <- listener hdl
             acceptStream ctx
 
     acquireConn :: IO Socket
@@ -40,10 +43,11 @@ main = main' `catch` restart
     releaseConn :: Socket -> IO ()
     releaseConn = sClose
 
-    restart :: HTTP2Error -> IO ()
-    restart e@ConnectionError{}  = do
+    connError :: HTTP2Error -> IO ()
+    connError e@ConnectionError{}  = do
         traceIO "caught error"
         traceIO $ show e
+        main
 
 -- test1 :: IO ()
 -- test1 = do
@@ -55,35 +59,9 @@ main = main' `catch` restart
 --     dialer hdl
 --     takeMVar done
 
-dialer :: Handle -> IO ()
-dialer hdl = do
-    mtid <- myThreadId
-    ctx <- attachMuxer HClient mtid (debugReceiver HClient hdl) (debugSender HClient hdl)
-    (_, w) <- dialStream ctx
-    (_, w2) <- dialStream ctx
-    writeStream w2 "The quick brown fox jumps over the lazy dog"
-    writeStream w "asdf"
-    writeStream w "asdf2"
+dialer :: Handle -> IO Context
+dialer = attachMuxer HClient 
 
-listener :: Handle -> ThreadId -> IO (Maybe Context)
-listener hdl tid =
-    Just <$> attachMuxer HServer tid 
-                 (debugReceiver HServer hdl) (debugSender HServer hdl)
-
-debugReceiver :: HTTP2HostType -> Handle -> Int -> IO ByteString
-debugReceiver ht hdl i = do
-    bs <- BS.hGet hdl i
-    traceIO "\n"
-    when (i == 9) $
-        traceIO . show $ decodeFrameHeader bs
-    traceStack (show i ++ " " ++ show ht ++ " Receive CallStack " ++ show bs) (pure ())
-    return bs
-
-debugSender :: HTTP2HostType -> Handle -> ByteString -> IO ()
-debugSender ht hdl bs = do
-    traceIO "\n"
-    when (BS.length bs == 9) $
-        traceIO .show $ decodeFrameHeader bs
-    traceStack (show ht ++ " Send CallStack " ++ show bs) (pure ())
-    BS.hPut hdl bs
+listener :: Handle -> IO Context
+listener = attachMuxer HServer
 

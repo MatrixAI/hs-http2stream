@@ -1,25 +1,27 @@
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Network.Stream.HTTP2.Types where
 
-import Data.ByteString (ByteString)
-import Network.HTTP2
-import Network.HTTP2.Priority
-import Network.HPACK
-import Data.IORef
 import Control.Concurrent.STM
 import Control.Exception (SomeException)
 import Control.Monad
 
+import Data.ByteString (ByteString)
+import Data.IORef
+
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as M
 
------------------------------------------------------------------
+import Network.HPACK
+import Network.HTTP2
+import Network.HTTP2.Priority
+
+----------------------------------------------------------------
 
 type Input = TQueue ByteString
 enqueueInput :: Input -> ByteString -> STM ()
@@ -53,7 +55,7 @@ data Context = Context {
   --   occur between the HEADERS frame and any CONTINUATION
   --   frames that might follow". This field is used to implement
   --   this requirement.
-  , continued          :: !(IORef (Maybe StreamId))
+  -- , continued          :: !(IORef (Maybe StreamId))
   , hostStreamId       :: !(IORef StreamId)
   , peerStreamId       :: !(IORef StreamId)
   , inputQ             :: !(TQueue Frame)
@@ -79,7 +81,6 @@ newContext = Context <$> newIORef defaultSettings
                      <*> newStreamTable
                      <*> newIORef 0
                      <*> newIORef 0
-                     <*> newIORef Nothing
                      <*> newIORef 1
                      <*> newIORef 2
                      <*> newTQueueIO
@@ -89,9 +90,6 @@ newContext = Context <$> newIORef defaultSettings
                      <*> newDynamicTableForEncoding defaultDynamicTableSize
                      <*> newDynamicTableForDecoding defaultDynamicTableSize 4096
                      <*> newTVarIO defaultInitialWindowSize
-
-clearContext :: Context -> IO ()
-clearContext ctx = return ()
 
 ----------------------------------------------------------------
 

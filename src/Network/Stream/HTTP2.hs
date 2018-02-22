@@ -4,23 +4,32 @@
 
 module Network.Stream.HTTP2 where
 
-import Data.ByteString (ByteString)
-import Network.HTTP2
-import Network.HTTP2.Priority
--- import Network.HPACK
-import Data.IORef
-
-import Network.Stream.HTTP2.Types
-import Network.Stream.HTTP2.Multiplexer
-import Network.Stream.HTTP2.EncodeFrame
-import qualified Control.Exception as E
 import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Monad
 
+import qualified Control.Exception as E
+
+import Data.IORef
+
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+
+import Debug.Trace
+
+import Network.HTTP2
+import Network.HTTP2.Priority
+import Network.Stream.HTTP2.EncodeFrame
+import Network.Stream.HTTP2.Receiver
+import Network.Stream.HTTP2.Sender
+import Network.Stream.HTTP2.Types
+
+import System.IO (Handle, hClose)
+
+----------------------------------------------------------------
+
 acceptStream :: Context -> IO (Maybe (Input, Output))
-acceptStream Context{peerStreamId, acceptQ} = do
-    atomically $ tryReadTQueue acceptQ
+acceptStream Context{acceptQ} = atomically $ tryReadTQueue acceptQ
 
 dialStream :: Context -> IO (Input, Output)
 dialStream ctx@Context{outputQ, openedStreams, hostStreamId, http2Settings} = do
@@ -47,40 +56,55 @@ writeStream OEndStream _ = error "Can't write to a finished stream"
 -- Start a thread for receiving frames and sending frames
 -- Does not use the thread pool manager from the Warp implementation
 attachMuxer :: HTTP2HostType 
-            -> ThreadId
-            -> (Int -> IO ByteString) -> (ByteString -> IO ()) 
+            -> Handle
             -> IO Context
-attachMuxer hostType mtid connRecv connSend  = do
+attachMuxer hostType conn = do
     connPreface hostType
     ctx@Context{} <- newContext
     case hostType of 
         HClient -> updateHostPeerIds ctx 1 2
         HServer -> updateHostPeerIds ctx 2 1
-    forkIO $ frameReceiver ctx connRecv `E.catch` throwOut
-    forkIO $ frameSender ctx connSend `E.catch` throwOut
+    _ <- forkIO $ frameReceiver ctx debugReceive `E.catch` onConnError
+    _ <- forkIO $ frameSender ctx debugSend `E.catch` onConnError
     return ctx
   where
-    -- Set the stored host and peer stream id depending on whether we are a 
-    -- client or a server
-    throwOut :: HTTP2Error -> IO ()
-    throwOut e@(ConnectionError ec bs) = do 
-        goaway connSend ec bs 
-        E.throwTo mtid e
+    debugReceive ::  Int -> IO ByteString
+    debugReceive i = do
+        bs <- BS.hGet conn i
+        traceIO "\n"
+        when (i == 9) $
+            traceIO . show $ decodeFrameHeader bs
+        traceStack (show i ++ " " ++ show hostType ++ " Receive CallStack " ++ show bs) (pure ())
+        return bs
+
+    debugSend :: ByteString -> IO ()
+    debugSend bs = do
+        traceIO "\n"
+        when (BS.length bs == 9) $
+            traceIO .show $ decodeFrameHeader bs
+        traceStack (show hostType ++ " Send CallStack " ++ show bs) (pure ())
+        BS.hPut conn bs
+
+    onConnError :: HTTP2Error -> IO ()
+    onConnError e@(ConnectionError ec bs) = do 
+        goaway debugSend ec bs 
+        hClose conn
+
     updateHostPeerIds Context{hostStreamId, peerStreamId} hid pid = do
         atomicModifyIORef' hostStreamId $ const (hid, ())
         atomicModifyIORef' peerStreamId $ const (pid, ())
     
     connPreface HServer = do
-        preface <- connRecv connectionPrefaceLength
+        preface <- debugReceive connectionPrefaceLength
         when (connectionPreface /= preface) $ do
-            goaway connSend ProtocolError "Preface mismatch"
+            goaway debugSend ProtocolError "Preface mismatch"
             E.throwIO $ ConnectionError ProtocolError "Preface mismatch"
-        connSend $ settingsFrame id []
+        debugSend $ settingsFrame id []
 
-    connPreface HClient = connSend connectionPreface
+    connPreface HClient = debugSend connectionPreface
 
 -- connClose must not be called here since Run:fork calls it
 goaway :: (ByteString -> IO ()) -> ErrorCodeId -> ByteString -> IO ()
-goaway connSend etype debugmsg = connSend bytestream
+goaway send etype debugmsg = send bytestream
   where
     bytestream = goawayFrame 0 etype debugmsg

@@ -19,5 +19,6 @@ cabal.sandbox.config
 cabal.project.local
 cabal.project.local~
 .HTF/
+.experimental
 .ghc.environment.*
 

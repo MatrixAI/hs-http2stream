@@ -1,32 +1,30 @@
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 
-module Network.Stream.HTTP2.Multiplexer where
+module Network.Stream.HTTP2.Receiver where
 
+import Control.Monad
+import Control.Concurrent
 import Control.Concurrent.STM
+
 import qualified Control.Exception as E
-import qualified Data.ByteString as BS
+
 import Data.ByteString (ByteString)
 import Data.IORef
-import Debug.Trace
-import Control.Monad
-import Control.Monad.Reader
 
---import Data.ByteString.Builder (Builder)
---import qualified Data.ByteString.Builder.Extra as B
 import Network.HTTP2
-import Network.HPACK
 import Network.HTTP2.Priority
+import Network.Stream.HTTP2.EncodeFrame
 import Network.Stream.HTTP2.Types
 
-import Network.Stream.HTTP2.EncodeFrame
+----------------------------------------------------------------
 
-frameReceiver :: Context -> (Int -> IO BS.ByteString) -> IO ()
+frameReceiver :: Context -> (Int -> IO ByteString) -> IO ()
 frameReceiver ctx@Context{..} recv = forever $ do
     -- Receive and decode the frame header and payload
     hdr <- recv frameHeaderLength
@@ -34,7 +32,7 @@ frameReceiver ctx@Context{..} recv = forever $ do
     let FrameHeader{payloadLength, streamId} = fhdr
 
     if hdr == ""
-      then pure ()
+      then yield
       else do
         readIORef http2Settings >>= checkFrameHeader' typhdr
 
@@ -68,9 +66,18 @@ frameReceiver ctx@Context{..} recv = forever $ do
             forM_ sl $ \case
               (SettingsInitialWindowSize, ws') ->
                 updateAllStreamWindow (\x -> x + ws' - ws) openedStreams
-              _ -> traceStack "Failed settings control" (pure ())
             atomicWriteIORef http2Settings set'
             sendSettingsAck
+
+    control FrameHeader{flags} (PingFrame bs)
+      | testAck flags = pure ()
+      | otherwise = sendPingAck bs
+
+    control _ (GoAwayFrame sid err bs) = 
+        E.throwIO (ConnectionError err bs)
+
+    control _ (WindowUpdateFrame ws) = 
+        updateAllStreamWindow (ws+) openedStreams
 
     stream :: StreamId -> (Int, FramePayload) -> IO ()
     stream sid (frameLen, fpl) = search openedStreams sid >>= \case
@@ -99,8 +106,6 @@ frameReceiver ctx@Context{..} recv = forever $ do
 
     newStream :: StreamId -> FramePayload -> IO ()
     newStream sid HeadersFrame{} = do
-        cont <- readIORef continued
-        -- Need to read the stream headers and make a new stream
         psid <- readIORef peerStreamId
         when (psid > sid) $
             E.throwIO $ ConnectionError ProtocolError
@@ -115,7 +120,9 @@ frameReceiver ctx@Context{..} recv = forever $ do
         enqueue outputQ sid pre wtr
         enqueueQ acceptQ (rdr, wtr)
 
+    newStream sid (PriorityFrame pri) = prepare outputQ sid pri
     newStream sid _ = sendReset ProtocolError sid
+
 
     checkFrameHeader' :: (FrameTypeId, FrameHeader) -> Settings -> IO ()
     checkFrameHeader' (FramePushPromise, _) _ =
@@ -129,7 +136,7 @@ frameReceiver ctx@Context{..} recv = forever $ do
         Just (ConnectionError err msg) -> do
             psid <- readIORef peerStreamId
             let !frame = goawayFrame psid err msg
-            atomically $ writeTQueue controlQ $ CGoaway frame
+            enqueueQ controlQ $ CGoaway frame
         _ -> pure ()
 
     sendReset err sid = do
@@ -139,50 +146,8 @@ frameReceiver ctx@Context{..} recv = forever $ do
     sendSettingsAck = do
         let !ack = settingsFrame setAck []
         enqueueQ controlQ $ CSettings ack []
-
-frameSender :: Context -> (BS.ByteString -> IO ()) -> IO ()
-frameSender Context {controlQ, outputQ, encodeDynamicTable} send = forever $ do
-    control <- atomically $ tryReadTQueue controlQ
-    case control of
-      Just (CSettings bs _) -> send bs
-      Just (CFrame bs) -> send bs
-      Nothing -> isEmpty outputQ >>= \case
-          False -> do
-            (sid, pre, ostrm) <- dequeue outputQ
-            encodeOutput encodeDynamicTable sid ostrm >>= send
-            enqueue outputQ sid pre =<< nextOutput ostrm
-          True -> pure ()
-      _ -> traceIO $ show control
-
-nextOutput :: Output -> IO Output
-nextOutput (OHeader mkHdr next) = pure next
-nextOutput (OMkStream mkStrm) = mkStrm
-nextOutput ostrm@OStream{} = pure ostrm
-nextOutput OEndStream = error "We shouldn't be calling nextOutput once done"
-
-encodeOutput :: DynamicTable -> StreamId -> Output -> IO ByteString
-encodeOutput encodeDT sid = runReaderT mkOutput
-  where
-    -- TODO: Use encodeFrameChunks instead of encodeFrame
-    mkOutput :: ReaderT Output IO ByteString
-    mkOutput = do
-        ostrm <- ask
-        payload <- mkPayload ostrm
-        pure $ encodeFrame (mkEncodeInfo ostrm) (mkFramePayload ostrm payload)
-
-    mkPayload :: Output -> ReaderT Output IO ByteString
-    mkPayload = \case
-        OHeader mkHdr _ -> liftIO $ mkHdr encodeDT
-        OStream ostrm   -> liftIO . atomically $ readTQueue ostrm
-        OEndStream      -> pure ""
-
-    mkFramePayload :: Output -> ByteString -> FramePayload
-    mkFramePayload OHeader{} = HeadersFrame Nothing
-    mkFramePayload OStream{} = DataFrame
-    mkFramePayload OEndStream = DataFrame
-
-    mkEncodeInfo :: Output -> EncodeInfo
-    mkEncodeInfo OHeader{} = encodeInfo setEndHeader sid
-    mkEncodeInfo OStream{} = encodeInfo id sid
-    mkEncodeInfo OEndStream{} = encodeInfo setEndStream sid
+    
+    sendPingAck bs = do
+        let !ack = pingFrame bs
+        enqueueQ controlQ $ CFrame ack
 

@@ -27,11 +27,6 @@ pingFrame bs = encodeFrame einfo $ PingFrame bs
   where
     einfo = encodeInfo setAck 0
 
-pingFrameAck :: ByteString -> ByteString
-pingFrameAck bs = encodeFrame einfo $ PingFrame bs
-  where
-    einfo = encodeInfo setAck 1
-
 windowUpdateFrame :: StreamId -> WindowSize -> ByteString
 windowUpdateFrame sid winsiz = encodeFrame einfo $ WindowUpdateFrame winsiz
   where
