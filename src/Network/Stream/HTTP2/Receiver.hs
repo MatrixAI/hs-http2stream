@@ -112,7 +112,7 @@ frameReceiver ctx@Context{..} recv = forever $ do
                         "New peer stream identifier must not decrease"
         atomicModifyIORef' peerStreamId $ const (sid, ())
         Settings{initialWindowSize} <- readIORef http2Settings
-        lstrm@ListenStream{precedence} <- lstream sid initialWindowSize
+        lstrm@OpenStream{precedence} <- lstream sid initialWindowSize
         insert openedStreams sid lstrm
         let rdr = inputStream lstrm
         let wtr = outputStream lstrm

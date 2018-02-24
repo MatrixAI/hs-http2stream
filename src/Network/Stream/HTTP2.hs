@@ -35,7 +35,7 @@ dialStream :: Context -> IO (Input, Output)
 dialStream ctx@Context{outputQ, openedStreams, hostStreamId, http2Settings} = do
     hsid <- readIORef hostStreamId
     Settings{initialWindowSize} <- readIORef http2Settings
-    dialed@DialStream { inputStream
+    dialed@OpenStream { inputStream
                       , outputStream
                       , precedence } <- dstream hsid initialWindowSize
     pre <- readIORef precedence

@@ -94,13 +94,7 @@ newContext = Context <$> newIORef defaultSettings
 ----------------------------------------------------------------
 
 data Stream (a :: StreamState) where
-  DialStream   :: { streamId     :: !StreamId
-                  , precedence   :: !(IORef Precedence)
-                  , window       :: !(TVar WindowSize)
-                  , inputStream  :: Input
-                  , outputStream :: Output
-                  } -> Stream 'Open
-  ListenStream :: { streamId     :: !StreamId
+  OpenStream   :: { streamId     :: !StreamId
                   , precedence   :: !(IORef Precedence)
                   , window       :: !(TVar WindowSize)
                   , inputStream  :: Input
@@ -136,13 +130,12 @@ makeStream cons sid win out = cons sid <$> newIORef defaultPrecedence
                                        <*> pure out
 
 lstream :: StreamId -> WindowSize -> IO (Stream 'Open)
-lstream sid win = makeStream ListenStream 
+lstream sid win = makeStream OpenStream 
                              sid win responseHeader
 
 dstream :: StreamId -> WindowSize -> IO (Stream 'Open)
-dstream sid win = makeStream DialStream 
+dstream sid win = makeStream OpenStream 
                              sid win requestHeader
-
 
 closeStream :: StreamId -> ClosedCode -> Stream 'Closed
 closeStream = ClosedStream
