@@ -1,6 +1,7 @@
 module Network.Stream.HTTP2.EncodeFrame where
 
 import Data.ByteString (ByteString)
+
 import Network.HTTP2
 
 ----------------------------------------------------------------

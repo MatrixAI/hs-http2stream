@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE GADTs #-}
@@ -28,29 +29,38 @@ import System.IO (Handle, hClose)
 
 ----------------------------------------------------------------
 
-acceptStream :: Context -> IO (Maybe (Input, Output))
-acceptStream Context{acceptQ} = atomically $ tryReadTQueue acceptQ
+acceptStream :: Context -> IO P2PStream
+acceptStream Context{acceptQ} = atomically $ readTQueue acceptQ
 
-dialStream :: Context -> IO (Input, Output)
+dialStream :: Context -> IO P2PStream
 dialStream ctx@Context{outputQ, openedStreams, hostStreamId, http2Settings} = do
     hsid <- readIORef hostStreamId
     Settings{initialWindowSize} <- readIORef http2Settings
-    dialed@OpenStream { inputStream
-                      , outputStream
-                      , precedence } <- dstream hsid initialWindowSize
-    pre <- readIORef precedence
+    strm@OpenStream { inputStream
+                    , outputStream
+                    } <- openStream hsid initialWindowSize defaultPrecedence
     atomicModifyIORef' hostStreamId (\x -> (x+2, ()))
-    insert openedStreams hsid dialed
-    enqueue outputQ hsid pre outputStream
-    return (inputStream, outputStream)
+    let framer = FMkStream hsid requestHeader outputStream
+    enqueue outputQ hsid defaultPrecedence framer
+    insert openedStreams hsid strm
+    return $ P2PStream hsid inputStream outputStream
 
-writeStream :: Output -> ByteString -> IO ()
-writeStream (OStream ws) bs = atomically $ writeTQueue ws bs
-writeStream (OMkStream mkStrm) bs = join $ writeStream <$> mkStrm
-                                                       <*> pure bs
-writeStream OEndStream _ = error "Can't write to a finished stream"
+readStream :: P2PStream -> IO ByteString
+readStream (P2PStream _ is _) = atomically $ readTQueue is
 
+writeStream :: P2PStream -> ByteString -> IO ()
+writeStream (P2PStream _ _ os) = atomically . writeTQueue os
 
+-- | Close an open stream in the connection context
+-- Returns () with no side effects if the stream has already been closed or idle
+closeStream :: Context -> P2PStream -> IO ()
+closeStream Context{openedStreams, outputQ} (P2PStream sid is os) =
+    search openedStreams sid >>= \case
+        Just strm@OpenStream{precedence} -> do
+            pre <- readIORef precedence
+            remove openedStreams sid
+            enqueue outputQ sid pre (FEndStream sid)
+        Nothing -> pure ()
 ----------------------------------------------------------------
 
 -- Start a thread for receiving frames and sending frames
@@ -81,7 +91,7 @@ attachMuxer hostType conn = do
     debugSend bs = do
         traceIO "\n"
         when (BS.length bs == 9) $
-            traceIO .show $ decodeFrameHeader bs
+            traceIO . show $ decodeFrameHeader bs
         traceStack (show hostType ++ " Send CallStack " ++ show bs) (pure ())
         BS.hPut conn bs
 

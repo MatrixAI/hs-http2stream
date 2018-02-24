@@ -58,31 +58,43 @@ frameReceiver ctx@Context{..} recv = forever $ do
       | otherwise =
         case checkSettingsList sl of
           -- settings list received was invalid
-          Just h2error -> E.throwIO h2error 
+          Just h2error -> E.throwIO h2error
           Nothing -> do
             set <- readIORef http2Settings
             let set' = updateSettings set sl
             let ws = initialWindowSize set
             forM_ sl $ \case
-              (SettingsInitialWindowSize, ws') ->
+              (SettingsInitialWindowSize, ws') -> 
                 updateAllStreamWindow (\x -> x + ws' - ws) openedStreams
+              _ -> pure ()
             atomicWriteIORef http2Settings set'
             sendSettingsAck
+    control _ (GoAwayFrame sid err bs) = 
+        E.throwIO (ConnectionError err bs)
 
     control FrameHeader{flags} (PingFrame bs)
       | testAck flags = pure ()
       | otherwise = sendPingAck bs
 
-    control _ (GoAwayFrame sid err bs) = 
-        E.throwIO (ConnectionError err bs)
-
     control _ (WindowUpdateFrame ws) = 
         updateAllStreamWindow (ws+) openedStreams
+
+    control _ (UnknownFrame _ _) = 
+        pure ()
+
+    checkEndFlags :: FrameFlags -> (StreamId -> IO ())
+    checkEndFlags flags 
+      | testEndStream flags = remove openedStreams
+      | testEndHeader flags = const $ writeIORef continued Nothing
 
     stream :: StreamId -> (Int, FramePayload) -> IO ()
     stream sid (frameLen, fpl) = search openedStreams sid >>= \case
         Just open -> handleStream sid (frameLen, fpl) open
-        Nothing -> newStream sid fpl
+        Nothing -> do
+            psid <- readIORef peerStreamId
+            if sid >= psid
+                then newStream sid fpl
+                else sendReset StreamClosed sid
 
     handleStream :: StreamId -> (Int, FramePayload) -> Stream 'Open -> IO ()
     handleStream sid (paylen, fpl) ostrm = handleFrame fpl
@@ -104,6 +116,12 @@ frameReceiver ctx@Context{..} recv = forever $ do
             then atomically $ modifyTVar' connectionWindow (ws+)
             else atomically $ modifyTVar' win (ws+)
 
+        handleFrame (RSTStreamFrame eid) =
+            remove openedStreams sid
+
+        handleFrame (UnknownFrame _ _) = 
+            pure ()
+
     newStream :: StreamId -> FramePayload -> IO ()
     newStream sid HeadersFrame{} = do
         psid <- readIORef peerStreamId
@@ -112,17 +130,21 @@ frameReceiver ctx@Context{..} recv = forever $ do
                         "New peer stream identifier must not decrease"
         atomicModifyIORef' peerStreamId $ const (sid, ())
         Settings{initialWindowSize} <- readIORef http2Settings
-        lstrm@OpenStream{precedence} <- lstream sid initialWindowSize
-        insert openedStreams sid lstrm
-        let rdr = inputStream lstrm
-        let wtr = outputStream lstrm
-        pre <- readIORef precedence
-        enqueue outputQ sid pre wtr
-        enqueueQ acceptQ (rdr, wtr)
+
+        strm@OpenStream { inputStream
+                        , outputStream
+                        } <- openStream sid initialWindowSize defaultPrecedence
+
+        let framer = FMkStream sid responseHeader outputStream
+        enqueue outputQ sid defaultPrecedence framer
+        insert openedStreams sid strm
+        enqueueAccept $ P2PStream sid inputStream outputStream
+
+    newStream sid DataFrame{} = sendReset StreamClosed sid
 
     newStream sid (PriorityFrame pri) = prepare outputQ sid pri
-    newStream sid _ = sendReset ProtocolError sid
 
+    newStream sid _ = sendReset ProtocolError sid
 
     checkFrameHeader' :: (FrameTypeId, FrameHeader) -> Settings -> IO ()
     checkFrameHeader' (FramePushPromise, _) _ =
@@ -131,23 +153,25 @@ frameReceiver ctx@Context{..} recv = forever $ do
         let typhdr' = checkFrameHeader settings typhdr
         in either E.throwIO mempty typhdr'
 
-
     sendGoaway e = case E.fromException e of
         Just (ConnectionError err msg) -> do
             psid <- readIORef peerStreamId
             let !frame = goawayFrame psid err msg
-            enqueueQ controlQ $ CGoaway frame
+            enqueueControl $ CGoaway frame
         _ -> pure ()
 
     sendReset err sid = do
         let !frame = resetFrame err sid
-        enqueueQ controlQ $ CFrame frame
+        enqueueControl $ CFrame frame
 
     sendSettingsAck = do
         let !ack = settingsFrame setAck []
-        enqueueQ controlQ $ CSettings ack []
+        enqueueControl $ CSettings ack []
     
     sendPingAck bs = do
         let !ack = pingFrame bs
-        enqueueQ controlQ $ CFrame ack
+        enqueueControl $ CFrame ack
+
+    enqueueAccept = enqueueQ acceptQ
+    enqueueControl = enqueueQ controlQ
 

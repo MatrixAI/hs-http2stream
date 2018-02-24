@@ -10,6 +10,8 @@ import Control.Monad.Reader
 
 import Data.ByteString (ByteString)
 
+import Debug.Trace
+
 import Network.HPACK
 import Network.HTTP2
 import Network.HTTP2.Priority
@@ -25,41 +27,57 @@ frameSender Context {controlQ, outputQ, encodeDynamicTable} send = forever $ do
       Just (CFrame bs) -> send bs
       Nothing -> isEmpty outputQ >>= \case
           False -> do
-            (sid, pre, ostrm) <- dequeue outputQ
-            encodeOutput encodeDynamicTable sid ostrm >>= send
-            enqueue outputQ sid pre =<< nextOutput ostrm
+            (sid, pre, framer) <- dequeue outputQ
+            encodeOutput encodeDynamicTable sid framer >>= send
+            case nextOutput framer of
+                Just FEndStream{} -> 
+                    traceIO "hit end stream"
+                Just x -> do
+                    traceIO "hit other"
+                    enqueue outputQ sid pre x
+                Nothing -> pure ()
           True -> pure ()
 
-nextOutput :: Output -> IO Output
-nextOutput (OHeader _ next) = pure next
-nextOutput (OMkStream mkStrm) = mkStrm
-nextOutput ostrm@OStream{} = pure ostrm
-nextOutput OEndStream = error "We shouldn't be calling nextOutput once done"
+nextOutput :: Framer -> Maybe Framer
+nextOutput (FMkStream sid mkHeaders out) = Just $ FStream sid out
+nextOutput fstrm@FStream{} = Just fstrm
+nextOutput (FEndStream sid) = Nothing
 
-encodeOutput :: DynamicTable -> StreamId -> Output -> IO ByteString
-encodeOutput encodeDT sid = runReaderT mkOutput
-  where
+encodeOutput :: DynamicTable -> StreamId -> Framer -> IO ByteString
+encodeOutput encodeDT sid = runReaderT mkFrame
+  where 
     -- TODO: Use encodeFrameChunks instead of encodeFrame
-    mkOutput :: ReaderT Output IO ByteString
-    mkOutput = do
-        ostrm <- ask
-        payload <- mkPayload ostrm
-        pure $ encodeFrame (mkEncodeInfo ostrm) (mkFramePayload ostrm payload)
+    mkFrame :: ReaderT Framer IO ByteString
+    mkFrame = do
+        framer <- ask
+        payload <- mkPayload framer
+        pure $ encodeFrame (mkEncodeInfo framer) (mkFramePayload framer payload)
 
-    mkPayload :: Output -> ReaderT Output IO ByteString
+    mkPayload :: Framer -> ReaderT Framer IO ByteString
     mkPayload = \case
-        OHeader mkHdr _ -> liftIO $ mkHdr encodeDT
-        OMkStream mkStrm -> liftIO mkStrm >>= mkPayload
-        OStream ostrm   -> liftIO . atomically $ readTQueue ostrm
-        OEndStream      -> pure ""
+        FMkStream _ mkHdr _ -> liftIO (mkHdr encodeDT)
+        FStream _ out      -> liftIO . atomically $ readTQueue out
+        FEndStream{}       -> pure ""
+        FTerminal{}        -> error "Library error, please report this: \
+                                    \tried to mkPayload for \
+                                    \a terminal stream state"
 
-    mkFramePayload :: Output -> ByteString -> FramePayload
-    mkFramePayload OHeader{} = HeadersFrame Nothing
-    mkFramePayload OStream{} = DataFrame
-    mkFramePayload OEndStream = DataFrame
+    mkFramePayload :: Framer -> ByteString -> FramePayload
+    mkFramePayload FMkStream{} = HeadersFrame Nothing
+    mkFramePayload FStream{} = DataFrame
+    mkFramePayload FEndStream{} = DataFrame
+    mkFramePayload FTerminal{} = error "Library error, please report this: \
+                                       \tried to mkFramePayload for \
+                                       \a terminal stream state"
 
-    mkEncodeInfo :: Output -> EncodeInfo
-    mkEncodeInfo OHeader{} = encodeInfo setEndHeader sid
-    mkEncodeInfo OStream{} = encodeInfo id sid
-    mkEncodeInfo OEndStream{} = encodeInfo setEndStream sid
+    mkEncodeInfo :: Framer -> EncodeInfo
+    mkEncodeInfo FMkStream{} = 
+        encodeInfo setEndHeader sid
+    mkEncodeInfo FStream{} =
+        encodeInfo id sid
+    mkEncodeInfo FEndStream{} =
+        encodeInfo setEndStream sid
+    mkEncodeInfo FTerminal{} = error "Library error, please report this: \
+                                     \tried to mkEncodeInfo for \
+                                     \a terminal stream state"
 

@@ -1,8 +1,6 @@
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 import Control.Concurrent
-import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad
 
@@ -31,11 +29,10 @@ main :: IO ()
 main = main' `catch` connError
   where
     main' :: IO ()
-    main' = bracket acquireConn releaseConn $ \sck ->
-        forever . void $ do
-            (hdl,_,_) <- accept sck
+    main' = acquireConn >>= \sck -> 
+        bracket (accept sck) (\(hdl, _, _) -> hClose hdl)  $ \(hdl,_,_) -> do
             ctx <- listener hdl
-            acceptStream ctx
+            testResponsePayload ctx
 
     acquireConn :: IO Socket
     acquireConn = listenOn (PortNumber 27001)
@@ -49,15 +46,20 @@ main = main' `catch` connError
         traceIO $ show e
         main
 
--- test1 :: IO ()
--- test1 = do
---     done <- newEmptyMVar
---     scka <- connectTo (PortNumber 27001)
---     _ <- forkIO $ listener scka
---     sck <- listenOn (PortNumber 27001)
---     (hdl, _, _) <- accept sck
---     dialer hdl
---     takeMVar done
+-- If we accept and close a stream, we should send no data frames
+-- And set the end stream flag on the header of the connection
+testNoResponsePayload :: Context -> IO ()
+testNoResponsePayload ctx = do
+    strm@P2PStream{} <- acceptStream ctx
+    closeStream ctx strm
+
+testResponsePayload :: Context -> IO ()
+testResponsePayload ctx = do
+    strm@P2PStream{} <- acceptStream ctx
+    writeStream strm "testResponsePayload"
+    closeStream ctx strm
+    threadDelay 1000
+
 
 dialer :: Handle -> IO Context
 dialer = attachMuxer HClient 
