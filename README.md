@@ -1,20 +1,11 @@
 # http2stream
-HTTP2 Stream Muxer based on Warp server types
+HTTP2 Stream Muxer to support the LibP2P API
 
-Currently a Work In Progress.
+Work In Progress.
 
 TODO List:
-- QuickCheck tests
-- FrameSender and FrameReceiver
-- accept and dialStream
-- Catch Stream and Connection errors in frame sender and frame receiver, and
-  send the relevant rst_stream/ goaway frames to the peer.
+- All the partial functions in Sender are pretty smelly. Especially the errors that I give out if we try to encode a closed stream. We should be able to mark the Output type with a tag like we mark Streams (i.e. Output 'Closed and Output 'Open).
 
 Future Work:
-- I think it is possible to lift the state of the stream to the type level
-  using an extension like -XTypeFamilies. the type could look something like
-  data Stream (a :: StreamState)  = ...
-  Not yet sure what problems I'd run into, but worth trying later. Maybe this
-  was how the original functional implementation of Warp worked, as they have
-  an OpenState that has access to all the queues that you actually need to
-  write into (with instance Monad Stream).
+- I hate how imperative this thing is. I want to refactor all the connection code in the frame receiver into an ADT that we execute over.
+- We tag the stream type with whether it is Open or Closed, i.e. Stream 'Open or Stream 'Closed. This eliminates some partial functions in the Receiver. But introduces some problems over how streams of different states are stored. Probably best figured out after we refactor the Receiver and Sender into an ADT.
