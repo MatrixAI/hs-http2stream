@@ -5,12 +5,10 @@ license: Apache-2.0
 author: ['Quoc-An Ho', 'CMCDragonkai']
 maintainer: 'roger.qiu@matrix.ai'
 copyright: '(c) 2017 Matrix AI'
+description: Please see the README on Github at <https://github.com/MatrixAI/hs-http2stream#readme>
 
 extra-source-files:
   - README.md
-  - ChangeLog.md
-
-description: Please see the README on Github at <https://github.com/MatrixAI/hs-http2stream#readme>
 
 dependencies:
   - base >= 4.7 && < 5
@@ -25,14 +23,14 @@ library:
     - Network.Stream.HTTP2.Receiver
     - Network.Stream.HTTP2.Sender
   dependencies:
-    - bytestring
-    - bytestring-strict-builder
-    - http-types
-    - http2
-    - mtl
-    - stm
-    - containers
-    - extra
+    - bytestring >= 0.10 && < 0.11
+    - bytestring-strict-builder >= 0.4 && < 0.5
+    - http-types >= 0.12 && < 0.13
+    - http2 >= 1.6 && < 1.7
+    - mtl >= 2.2 && < 2.3
+    - stm >= 2.4 && < 2.5
+    - containers >= 0.5 && < 0.6
+    - extra >= 1.6 && < 1.7
 
 tests:
   http2stream:
@@ -44,7 +42,7 @@ tests:
       - -with-rtsopts=-N
     dependencies:
       - http2stream
-      - http2
-      - network
+      - http2 >= 1.6 && < 1.7
+      - network >= 2.6 && < 2.7
 
 

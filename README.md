@@ -30,3 +30,14 @@ Future Work:
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N -fprof-auto
                        -fprof-auto-calls -fbreak-on-exception
 ```
+
+---
+
+Restart
+
+Time to figure out what's going on here.
+
+Exposed modules is `Network.Stream.HTTP2` which exposes `HTTP2` functions. Also `Network.Stream.Types` which exposes some of the types required.
+
+The swarm system requires it?
+We should also check the swarm.
