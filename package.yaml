@@ -1,0 +1,50 @@
+name: http2stream
+version: 0.1.0
+github: "MatrixAI/hs-http2stream"
+license: Apache-2.0
+author: ['Quoc-An Ho', 'CMCDragonkai']
+maintainer: 'roger.qiu@matrix.ai'
+copyright: '(c) 2017 Matrix AI'
+
+extra-source-files:
+  - README.md
+  - ChangeLog.md
+
+description: Please see the README on Github at <https://github.com/MatrixAI/hs-http2stream#readme>
+
+dependencies:
+  - base >= 4.7 && < 5
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - Network.Stream.HTTP2
+    - Network.Stream.HTTP2.Types
+  other-modules:
+    - Network.Stream.HTTP2.EncodeFrame
+    - Network.Stream.HTTP2.Receiver
+    - Network.Stream.HTTP2.Sender
+  dependencies:
+    - bytestring
+    - bytestring-strict-builder
+    - http-types
+    - http2
+    - mtl
+    - stm
+    - containers
+    - extra
+
+tests:
+  http2stream:
+    main: Spec.hs
+    source-dirs: test
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - http2stream
+      - http2
+      - network
+
+

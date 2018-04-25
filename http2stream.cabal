@@ -1,52 +1,64 @@
-name:                http2stream
-version:             0.1.0
--- synopsis:
--- description:
-homepage:            https://github.com/plintx/http2stream#readme
-license:             BSD3
-license-file:        LICENSE
-author:              Quoc-An Ho
-maintainer:          quoc.ho@matrix.ai
-category:            Network
-build-type:          Simple
-extra-source-files:  README.md
-cabal-version:       >=1.10
+-- This file has been generated from package.yaml by hpack version 0.21.2.
+--
+-- see: https://github.com/sol/hpack
+--
+-- hash: 9c73e3f3f7efc15cd7d9241a6dd6c96c03c405464e107ef4df788b85c1d9c641
 
-library
-  hs-source-dirs:      src
-  exposed-modules:     Network.Stream.HTTP2
-                     , Network.Stream.HTTP2.Types
-  other-modules:       Network.Stream.HTTP2.EncodeFrame
-                     , Network.Stream.HTTP2.Receiver
-                     , Network.Stream.HTTP2.Sender
-  build-depends:       base >= 4.7 && < 5
-                     , bytestring
-                     , bytestring-strict-builder
-                     , http-types
-                     , http2
-                     , mtl
-                     , stm
-                     , containers
-                     , extra
-  default-language:    Haskell2010
+name:           http2stream
+version:        0.1.0
+description:    Please see the README on Github at <https://github.com/MatrixAI/hs-http2stream#readme>
+homepage:       https://github.com/MatrixAI/hs-http2stream#readme
+bug-reports:    https://github.com/MatrixAI/hs-http2stream/issues
+author:         Quoc-An Ho,
+                CMCDragonkai
+maintainer:     roger.qiu@matrix.ai
+copyright:      (c) 2017 Matrix AI
+license:        Apache-2.0
+license-file:   LICENSE
+build-type:     Simple
+cabal-version:  >= 1.10
 
-test-suite test
-  type:                exitcode-stdio-1.0
-  hs-source-dirs:      test
-  main-is:             Spec.hs
-  build-depends:       base >= 4.7 && < 5
-                     , bytestring
-                     , http2
-                     , http2stream
-                     , stm
-                     , io-streams
-                     , containers
-                     , network
-                     , extra
-  ghc-options:         -threaded -rtsopts -with-rtsopts=-N -fprof-auto
-                       -fprof-auto-calls -fbreak-on-exception
-  default-language:    Haskell2010
+extra-source-files:
+    ChangeLog.md
+    README.md
 
 source-repository head
-  type:     git
-  location: https://github.com/MatrixAI/http2stream
+  type: git
+  location: https://github.com/MatrixAI/hs-http2stream
+
+library
+  exposed-modules:
+      Network.Stream.HTTP2
+      Network.Stream.HTTP2.Types
+  other-modules:
+      Network.Stream.HTTP2.EncodeFrame
+      Network.Stream.HTTP2.Receiver
+      Network.Stream.HTTP2.Sender
+  hs-source-dirs:
+      src
+  build-depends:
+      base >=4.7 && <5
+    , bytestring
+    , bytestring-strict-builder
+    , containers
+    , extra
+    , http-types
+    , http2
+    , mtl
+    , stm
+  default-language: Haskell2010
+
+test-suite http2stream
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_http2stream
+  hs-source-dirs:
+      test
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , http2
+    , http2stream
+    , network
+  default-language: Haskell2010
