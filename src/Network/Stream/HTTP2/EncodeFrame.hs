@@ -1,34 +1,34 @@
 module Network.Stream.HTTP2.EncodeFrame where
 
-import Data.ByteString (ByteString)
+import qualified Network.HTTP2 as H2
+import qualified Data.ByteString as BSStrict
 
-import Network.HTTP2
-
-----------------------------------------------------------------
-
-goawayFrame :: StreamId -> ErrorCodeId -> ByteString -> ByteString
-goawayFrame sid etype debugmsg = encodeFrame einfo frame
+goawayFrame :: H2.StreamId -> H2.ErrorCodeId -> BSStrict.ByteString -> BSStrict.ByteString
+goawayFrame streamId errorCode message = H2.encodeFrame info frame
   where
-    einfo = encodeInfo id 0
-    frame = GoAwayFrame sid etype debugmsg
+    info = H2.encodeInfo id 0
+    frame = H2.GoAwayFrame streamId errorCode message
 
-resetFrame :: ErrorCodeId -> StreamId -> ByteString
-resetFrame etype sid = encodeFrame einfo frame
+resetFrame :: H2.ErrorCodeId -> H2.StreamId -> BSStrict.ByteString
+resetFrame errorCode streamId = H2.encodeFrame info frame
   where
-    einfo = encodeInfo id sid
-    frame = RSTStreamFrame etype
+    info = H2.encodeInfo id streamId
+    frame = H2.RSTStreamFrame errorCode
 
-settingsFrame :: (FrameFlags -> FrameFlags) -> SettingsList -> ByteString
-settingsFrame func alist = encodeFrame einfo $ SettingsFrame alist
+settingsFrame :: (H2.FrameFlags -> H2.FrameFlags) -> H2.SettingsList -> BSStrict.ByteString
+settingsFrame func settings = H2.encodeFrame info frame
   where
-    einfo = encodeInfo func 0
+    info = H2.encodeInfo func 0
+    frame = H2.SettingsFrame settings
 
-pingFrame :: ByteString -> ByteString
-pingFrame bs = encodeFrame einfo $ PingFrame bs
+pingFrame :: BSStrict.ByteString -> BSStrict.ByteString
+pingFrame bs = H2.encodeFrame info frame
   where
-    einfo = encodeInfo setAck 0
+    info = H2.encodeInfo H2.setAck 0
+    frame = H2.PingFrame bs
 
-windowUpdateFrame :: StreamId -> WindowSize -> ByteString
-windowUpdateFrame sid winsiz = encodeFrame einfo $ WindowUpdateFrame winsiz
+windowUpdateFrame :: H2.StreamId -> H2.WindowSize -> BSStrict.ByteString
+windowUpdateFrame streamId size = H2.encodeFrame info frame
   where
-    einfo = encodeInfo id sid
+    info = H2.encodeInfo id streamId
+    frame = H2.WindowUpdateFrame size
